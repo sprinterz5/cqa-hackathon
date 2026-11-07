@@ -253,6 +253,20 @@
       } catch (e) { fail(e); } finally { fetchBtn.disabled = false; }
     } }, "Загрузить набор");
 
+    const exportBtn = h("button", { class: "btn", title: "Файл в формате организаторов (schema 1.0): последняя оценка каждого диалога набора по текущей версии чек-листа", onclick: async () => {
+      if (!state.group) return toast("Выберите набор", true);
+      exportBtn.disabled = true;
+      try {
+        const r = await api(`/export/results?group=${encodeURIComponent(state.group)}&checklist_id=${encodeURIComponent(state.checklistId)}`);
+        const blob = new Blob([JSON.stringify(r.results, null, 2)], { type: "application/json" });
+        const a = h("a", { href: URL.createObjectURL(blob), download: "results.json" });
+        document.body.append(a); a.click(); a.remove();
+        const okN = r.results.results.filter((x) => x.status === "ok").length;
+        toast(r.problems.length ? `Выгружено с замечаниями (${r.problems.length}): ${r.problems.slice(0, 3).join("; ")}`
+          : `results.json: ${r.total} диалогов, оценено ${okN}, чек-лист v${r.checklist_version}`, r.problems.length > 0);
+      } catch (e) { fail(e); } finally { exportBtn.disabled = false; }
+    } }, "Выгрузить results.json");
+
     const provOptions = [h("option", { value: "primary", selected: state.provider === "primary" },
       "Облако: " + ((state.health.providers.primary || {}).model || "не настроено"))];
     if (state.health.providers.local) provOptions.push(h("option", { value: "local", selected: state.provider === "local" }, "Локально: " + state.health.providers.local.model));
@@ -262,7 +276,7 @@
         h("div", null, h("h1", null, "Диалоги"), h("div", { class: "sub" }, "Выберите диалоги и запустите оценку по чек-листу")),
         h("span", { class: "spacer" }),
         groupInput, fetchBtn,
-        h("button", { class: "btn", onclick: uploadDialog }, "Добавить диалог")),
+        h("button", { class: "btn", onclick: uploadDialog }, "Добавить диалог"), exportBtn),
       h("div", { class: "panel", style: "margin-bottom:12px" },
         h("div", { class: "row" },
           h("label", { class: "field" }, "Набор",

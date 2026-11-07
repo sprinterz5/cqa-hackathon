@@ -16,6 +16,7 @@ import httpx
 
 from .checklist import Checklist
 from .evaluator import CriterionEvaluation, Evaluator, score_evaluations
+from .export import build_results, validate_results
 from .facts import extract_facts, facts_to_prompt
 from .llm import LLMClient, Provider, load_env, providers_from_env
 from .prompts import PROMPT_VERSION
@@ -339,6 +340,23 @@ class Service:
         return {"reviewer_agreement": stats,
                 "mean_confidence": {k: round(sum(v) / len(v), 3) for k, v in conf.items() if v},
                 "answer_distribution": dist, "evaluated_dialogs": len(evals)}
+
+    # ---------- export in the organizers' results.json format ----------
+    def export_results(self, group_id: str, checklist_id: str = "freedom_default", version: int | None = None,
+                       team_name: str | None = None) -> dict:
+        checklist = self.checklist(checklist_id, version)
+        ids = [d["conversation_id"] for d in self.store.list_dialogs(group_id)]
+        if not ids:
+            raise ServiceError(f"в группе {group_id} нет диалогов")
+        evals = {}
+        for cid in ids:
+            e = self.store.latest_evaluation(cid, checklist.id, checklist.version)
+            if e:
+                evals[cid] = e
+        kinds = {name: ("local" if name == "local" else "external_api") for name in self.providers}
+        data = build_results(checklist, ids, evals, team_name or os.environ.get("TEAM_NAME", "CQA team"), kinds)
+        return {"results": data, "problems": validate_results(data, ids),
+                "evaluated": len(evals), "total": len(ids), "checklist_version": checklist.version}
 
     # ---------- import results of scripts/evaluate.py ----------
     def import_cli_evals(self, group_id: str, checklist_id: str = "freedom_default") -> int:

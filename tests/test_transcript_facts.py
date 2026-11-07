@@ -90,3 +90,39 @@ def test_plain_text_upload():
     r = parse_plain_text("00:01 Клиент: привет\n00:05 operator: Здравствуйте, я Дана\nпродолжение\n")
     assert [m["speaker"] for m in r["transcript"]] == ["client", "operator"]
     assert r["transcript"][1]["text"].endswith("продолжение")
+
+
+def test_kazakh_call_events():
+    from cqa.facts import classify_event
+    cases = {
+        "Жазу және транскрипция басталды.": "recording_started",
+        "Агент клиентпен сөйлесуге қосылды.": "operator_joined",
+        "Клиент ұстауда.": "hold_start",
+        "Клиент енді ұстауда емес.": "hold_end",
+        "Агентпен кеңес басталды.": "consultation",
+        "Клиент сөйлесуді аяқтады.": "client_left",
+    }
+    for text, kind in cases.items():
+        assert classify_event(text) == kind, text
+
+
+def test_mixed_language_tags_only_for_mixed_dialogs():
+    from cqa.facts import detect_lang, extract_facts, facts_to_prompt, transcript_to_prompt
+    from cqa.transcript import normalize
+    assert detect_lang("Сәлеметсіз бе, мен Саматпын.") == "KZ"
+    assert detect_lang("Жарайды, растаймын.") == "KZ"
+    assert detect_lang("Hi, I'm Leo from support") == "EN"
+    assert detect_lang("Здравствуйте, меня зовут Алина") == "RU"
+    assert detect_lang("да") is None
+    mono = normalize(CHAT)
+    f = extract_facts(mono)
+    assert f.line_languages == {} and "[RU]" not in transcript_to_prompt(mono, f)
+    mixed = {**CHAT, "transcript": [
+        {"timestamp": "00:00", "speaker": "client", "text": "Сәлеметсіз бе, шотқа ақша түспеді"},
+        {"timestamp": "00:30", "speaker": "operator", "text": "Здравствуйте, меня зовут Алина. Сейчас проверю"},
+    ]}
+    d = normalize(mixed)
+    f = extract_facts(d)
+    assert f.line_languages == {"m1": "KZ", "m2": "RU"}
+    assert "CLIENT [KZ]" in transcript_to_prompt(d, f) and "OPERATOR [RU]" in transcript_to_prompt(d, f)
+    assert "первый ответ оператора: RU (m2)" in facts_to_prompt(f)

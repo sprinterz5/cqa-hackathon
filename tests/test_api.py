@@ -131,3 +131,38 @@ def test_plain_text_upload_and_list(env):
     ids = [d["conversation_id"] for d in client.get("/api/dialogs").json()]
     assert ids == ["chat-1", "txt-1"]
     assert client.get("/api/dialogs/txt-1").json()["dialog"]["messages"][1]["speaker"] == "operator"
+
+
+def test_export_results_format(env):
+    client, svc, script, clients = env
+    svc.upload({**CHAT, "conversation_id": "chat-2"}, group_id="T")
+    evaluate(client, ["chat-1"])  # chat-2 stays unevaluated -> status "error"
+    out = client.get("/api/export/results", params={"group": "T", "team_name": "Team"}).json()
+    assert out["problems"] == []
+    data = out["results"]
+    assert data["schema_version"] == "1.0" and data["team_name"] == "Team"
+    assert data["model"]["mode"] == "external_api" and data["model"]["name"]
+    by_id = {r["conversation_id"]: r for r in data["results"]}
+    assert set(by_id) == {"chat-1", "chat-2"}
+    ok = by_id["chat-1"]
+    assert ok["status"] == "ok" and ok["score"] == {"final_score": 100.0, "critical_flag": False}
+    codes = {c["criterion_id"]: c for c in ok["criteria"]}
+    assert sorted(codes) == sorted(["contact", "discovery", "identification", "consultation",
+                                    "empathy", "dialogue", "closure", "critical"])
+    assert codes["critical"]["value"] is False
+    assert all(isinstance(c["evidence_turns"], list) and c["evidence_turns"] for c in ok["criteria"])
+    err = by_id["chat-2"]
+    assert err == {"conversation_id": "chat-2", "status": "error", "criteria": [], "score": None,
+                   "error": "Диалог не оценён."}
+
+
+def test_validate_results_catches_bad_values():
+    from cqa.export import validate_results
+    bad = {"schema_version": "1.0", "team_name": "t", "model": {"mode": "cloud", "name": "x"},
+           "results": [{"conversation_id": "a", "status": "ok", "score": {"final_score": 50, "critical_flag": True},
+                        "criteria": [{"criterion_id": "dialogue", "value": 5, "evidence_turns": [0]}]},
+                       {"conversation_id": "a", "status": "error", "criteria": [], "score": None, "error": "x"}]}
+    errs = " | ".join(validate_results(bad, ["a", "b"]))
+    for frag in ("model.mode", "повторяются ID: a", "нет диалогов: b", "все 8 критериев", "dialogue: недопустимое",
+                 "evidence_turns", "critical_flag"):
+        assert frag in errs, frag

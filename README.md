@@ -50,3 +50,18 @@ Open http://localhost:8000 after starting the backend. Plain HTML/CSS/JS in `web
 Screens: dialogs (fetch by `group_id`, upload, batch evaluation with progress), dialog card (transcript with ids, evidence links that scroll to the message and seek the call recording, per-criterion verdicts/points/confidence, sections, gross-violation flag), appeals (operator files, reviewer confirms or changes with a reason; original and final score are both kept), checklist editor (criteria, weights, scales, N/A rules, voice-call wording, versions, JSON), AI quality.
 
 Import results of a CLI run into the app: `.venv/bin/python scripts/import_evals.py DEV`.
+
+## Results for the organizers
+
+`results/dev/results.json` and `results/prod/results.json` follow the organizers' format (schema 1.0): one record per dialog, 8 criteria (`contact`, `discovery`, `identification`, `consultation`, `empathy`, `dialogue`, `closure`, `critical`), `evidence_turns` numbered from 1 over the original transcript, `final_score` from the deterministic scorer, `status: "error"` with a reason when a dialog could not be evaluated. Criterion codes come from `export_codes` in the checklist config.
+
+Control stage (10 chats, 1 hour):
+
+```bash
+.venv/bin/python scripts/fetch_dataset.py <GROUP>            # or "Загрузить набор" in the UI
+# evaluate all dialogs of the group in the UI ("Оценить все показанные") or via POST /api/evaluations
+.venv/bin/python scripts/export_results.py <GROUP> --folder prod --team "<team name>"
+git add results/prod/results.json && git commit -m "Control results" && git push
+```
+
+The script validates the file (all IDs present, no duplicates, 8 criteria with allowed values, `critical_flag` = `critical`) and exits with code 1 on problems. The same export is available in the UI ("Выгрузить results.json") and at `GET /api/export/results?group=<GROUP>`.

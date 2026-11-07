@@ -206,6 +206,11 @@ def create_app(service: Service | None = None) -> FastAPI:
     def decide(appeal_id: int, body: DecisionBody):
         return svc().decide(appeal_id, body.decision, body.reason, body.answer, body.value, body.reviewer)
 
+    @app.get("/api/export/results")
+    def export_results(group: str = "DEV", checklist_id: str = "freedom_default", version: int | None = None,
+                       team_name: str | None = None):
+        return svc().export_results(group, checklist_id, version, team_name)
+
     @app.get("/api/quality")
     def quality():
         return svc().quality()

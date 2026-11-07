@@ -110,6 +110,8 @@ class Checklist(BaseModel):
     company_context: str | None = None  # optional product/company reference text
     sections: list[Section] = Field(default_factory=list)
     criteria: list[Criterion]
+    # criterion id -> code in the organizers' results.json (contact, discovery, ...); not part of prompts
+    export_codes: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check(self) -> "Checklist":

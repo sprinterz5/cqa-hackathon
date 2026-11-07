@@ -13,16 +13,16 @@ from .transcript import Dialog, Message, fmt_offset
 
 # --- system events (RU / KZ / EN). Order matters: more specific patterns first. ---
 EVENT_PATTERNS: list[tuple[str, str]] = [
-    ("hold_end", r"больше не находится на удержании|no longer on hold|ұстаудан шықты"),
+    ("hold_end", r"больше не находится на удержании|no longer on hold|ұстаудан шықты|ұстауда емес|ұстаудан босатылды"),
     ("hold_start", r"находится на удержании|placed on hold|is on hold|ұстауда"),
     ("identity_verified", r"личность клиента подтверждена|жеке басы расталды|identity (?:was )?verified"),
     ("operator_closed", r"оператор закрыл чат|оператор чатты жапты|agent closed the chat"),
-    ("client_left", r"клиент покинул чат|клиент завершил разговор|клиент чаттан шықты|customer left|customer ended"),
+    ("client_left", r"клиент покинул чат|клиент завершил разговор|клиент чаттан шықты|клиент (?:сөйлесуді|қоңырауды|әңгімені) аяқтады|customer left|customer ended"),
     ("connection_lost", r"соединение с клиентом прервано|байланыс үзілді|connection to customer lost"),
-    ("agent_left", r"агент вышел из разговора|agent left"),
+    ("agent_left", r"агент вышел из разговора|агент (?:сөйлесуден|әңгімеден) шықты|agent left"),
     ("escalation", r"эскалация на оператора|операторға жіберілді|transferred to an agent|переведен от агента на представителя"),
-    ("consultation", r"консультация с агентом|consultation"),
-    ("operator_joined", r"агент присоединился|agent joined"),
+    ("consultation", r"консультация с агентом|агентпен кеңес|consultation"),
+    ("operator_joined", r"агент присоединился|агент .{0,40}қосылды|agent joined"),
     ("recording_paused", r"приостановлен|recording paused|тоқтатылды"),
     ("recording_resumed", r"возобновлен|recording resumed|жалғастырылды"),
     ("recording_started", r"запись и транскрибирование запущен|жазу және транскрипция басталды|recording started"),
@@ -102,6 +102,35 @@ class Facts(BaseModel):
     silences: list[Gap]                        # calls: long pauses before operator speech
     pii: list[PiiHit]
     on_hold_ids: list[str] = []                # calls: messages spoken while the client was on hold
+    line_languages: dict[str, str] = {}        # filled only when client/operator lines use 2+ languages
+
+
+_KZ_CHARS = set("әғқңөұүһіӘҒҚҢӨҰҮҺІ")
+# frequent Kazakh words written without Kazakh-specific letters
+_KZ_WORDS = {"жарайды", "растаймын", "рахмет", "бе", "ма", "ме", "па", "пе", "керек", "мен", "сен", "болады",
+             "сау", "болыңыз", "жоқ", "иә", "жақсы", "дұрыс", "емес", "және", "бар", "қалай", "кейін"}
+_MASK = re.compile(r"\[[^\]]*\]")
+
+
+def detect_lang(text: str) -> str | None:
+    """RU / KZ / EN by script; None when the line is too short to tell. ASR of Kazakh speech
+    by a Russian model has no Kazakh letters and is detected as RU (that case needs re-transcription)."""
+    t = _MASK.sub(" ", text)
+    words = re.findall(r"[^\W\d_]+", t)
+    if len(words) < 2:
+        return None
+    letters = "".join(words)
+    latin = sum(1 for ch in letters if "a" <= ch.lower() <= "z")
+    if latin / len(letters) > 0.6:
+        return "EN"
+    if any(ch in _KZ_CHARS for ch in letters) or any(w.lower() in _KZ_WORDS for w in words):
+        return "KZ"
+    return "RU"
+
+
+def line_languages(msgs: list[Message]) -> dict[str, str]:
+    langs = {m.id: lg for m in msgs if m.speaker in ("client", "operator") and (lg := detect_lang(m.text))}
+    return langs if len(set(langs.values())) > 1 else {}
 
 
 def classify_event(text: str) -> str:
@@ -208,6 +237,7 @@ def extract_facts(d: Dialog, chat_wait: float = CHAT_WAIT_THRESHOLD,
         silences=silences,
         pii=[h for m in msgs for h in find_pii(m)],
         on_hold_ids=on_hold,
+        line_languages=line_languages(msgs),
     )
 
 
@@ -249,6 +279,16 @@ def facts_to_prompt(f: Facts) -> str:
                      "не оценивайте их как общение с клиентом.")
     for g in f.silences:
         lines.append(f"- Пауза {int(g.seconds)} с перед репликой оператора {g.to_id}.")
+    if f.line_languages:
+        def first(speaker_ids: list[str]) -> str:
+            return next((f"{f.line_languages[i]} ({i})" for i in speaker_ids if i in f.line_languages), "не определён")
+        by_lang: dict[str, list[str]] = {}
+        for i, lg in f.line_languages.items():
+            by_lang.setdefault(lg, []).append(i)
+        lines.append("- В диалоге несколько языков; реплики клиента и оператора помечены языком ([RU] / [KZ] / [EN]): "
+                     + "; ".join(f"{lg}: {len(ids)} репл." for lg, ids in sorted(by_lang.items()))
+                     + f". Первая реплика клиента: {first(f.client_before_operator)}; первый ответ оператора: "
+                     f"{first(f.operator_first_turn)}.")
     other = [e for e in f.events if e.type not in CLOSING and e.type != "identity_verified"]
     if other:
         lines.append("- Системные события: " + "; ".join(
@@ -260,7 +300,9 @@ def facts_to_prompt(f: Facts) -> str:
 def transcript_to_prompt(d: Dialog, f: Facts | None = None) -> str:
     """Numbered transcript: [m14] +02:49 OPERATOR: text  (hold-time lines tagged [HOLD])"""
     hold = set(f.on_hold_ids) if f else set()
+    langs = f.line_languages if f else {}
     return "\n".join(
-        f"[{m.id}] {fmt_offset(m.t)} {m.speaker.upper()}{' [HOLD]' if m.id in hold else ''}: {m.text}"
+        f"[{m.id}] {fmt_offset(m.t)} {m.speaker.upper()}{' [HOLD]' if m.id in hold else ''}"
+        f"{f' [{langs[m.id]}]' if m.id in langs else ''}: {m.text}"
         for m in d.messages
     )

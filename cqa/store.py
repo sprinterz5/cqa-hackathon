@@ -139,8 +139,12 @@ class Store:
         rows = self._q("SELECT * FROM evaluations WHERE id = ?", (eid,))
         return self._eval_row(rows[0]) if rows else None
 
-    def latest_evaluation(self, conversation_id: str, checklist_id: str | None = None) -> dict | None:
-        if checklist_id:
+    def latest_evaluation(self, conversation_id: str, checklist_id: str | None = None,
+                          version: int | None = None) -> dict | None:
+        if checklist_id and version is not None:
+            rows = self._q("SELECT * FROM evaluations WHERE conversation_id = ? AND checklist_id = ? "
+                           "AND checklist_version = ? ORDER BY id DESC LIMIT 1", (conversation_id, checklist_id, version))
+        elif checklist_id:
             rows = self._q("SELECT * FROM evaluations WHERE conversation_id = ? AND checklist_id = ? "
                            "ORDER BY id DESC LIMIT 1", (conversation_id, checklist_id))
         else:
