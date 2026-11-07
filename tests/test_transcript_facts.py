@@ -33,6 +33,65 @@ def test_ids_and_turns():
     assert [t.speaker for t in d.turns] == ["client", "bot", "system", "operator", "client", "operator", "system"]
 
 
+def test_asr_segments_preserve_speakers_times_and_translation():
+    d = normalize({
+        "conversation_id": "asr-1", "channel": "voice call", "language": "KZ",
+        "reference_transcript": [
+            {"speaker": "client", "text": "Сәлеметсіз бе"},
+            {"speaker": "client", "text": "Менің сұрағым бар"},
+            {"speaker": "operator", "text": "Тыңдап тұрмын"},
+        ],
+        "transcript": [
+            {"speaker": "speaker_1", "start": 1.25, "end": 2.5,
+             "source_language": "kk", "text": "Сәлеметсіз бе",
+             "translation_ru": "Здравствуйте"},
+            {"speaker": "speaker_1", "start": 2.5, "end_t": 3.0, "text": "Менің сұрағым бар"},
+            {"speaker": "speaker_2", "start": 3.1, "end": 4.2, "text": "Тыңдап тұрмын"},
+        ],
+    })
+    assert [m.speaker for m in d.messages] == ["client", "client", "operator"]
+    assert [m.speaker_id for m in d.messages] == ["speaker_1", "speaker_1", "speaker_2"]
+    assert [m.role_source for m in d.messages] == ["reference", "reference", "reference"]
+    assert not any(m.role_needs_review for m in d.messages)
+    assert [t.message_ids for t in d.turns] == [["m1", "m2"], ["m3"]]
+    assert [t.speaker_id for t in d.turns] == ["speaker_1", "speaker_2"]
+    assert (d.messages[0].t, d.messages[0].end_t) == (1.25, 2.5)
+    assert d.messages[1].end_t == 3.0
+    assert d.messages[0].source_language == "kk"
+    assert d.messages[0].translation_ru == "Здравствуйте"
+    assert d.messages[0].text == "Сәлеметсіз бе"
+    assert d.start_time is None
+
+
+def test_context_role_fallback_flags_review():
+    d = normalize({"conversation_id": "asr-2", "channel": "voice call",
+                   "transcript": [
+                       {"speaker": "speaker_1", "start": 0, "text": "Здравствуйте, меня зовут Алина. Чем могу помочь?"},
+                       {"speaker": "speaker_2", "start": 3, "text": "Мне нужно узнать баланс моего счета."},
+                   ]})
+    assert [m.speaker for m in d.messages] == ["operator", "client"]
+    assert all(m.role_source == "context" and m.role_needs_review for m in d.messages)
+
+
+def test_context_fallback_labels_bot_client_and_operator():
+    d = normalize({"conversation_id": "asr-ivr", "channel": "voice call",
+                   "transcript": [
+                       {"speaker": "speaker_1", "start": 0, "text": "Для выбора русского языка нажмите один."},
+                       {"speaker": "speaker_2", "start": 4, "text": "У меня вопрос по брокерскому счёту."},
+                       {"speaker": "speaker_3", "start": 8, "text": "Здравствуйте, меня зовут Алина. Чем могу помочь?"},
+                   ]})
+    assert [m.speaker for m in d.messages] == ["bot", "client", "operator"]
+    assert all(m.role_needs_review for m in d.messages)
+
+
+def test_explicit_speaker_map_takes_precedence():
+    d = normalize({"conversation_id": "asr-3", "speaker_map": {"speaker_1": "client"},
+                   "transcript": [{"speaker": "speaker_1", "start": 0, "text": "Здравствуйте"}]})
+    assert d.messages[0].speaker == "client"
+    assert d.messages[0].role_source == "speaker_map"
+    assert not d.messages[0].role_needs_review
+
+
 def test_chat_facts():
     f = extract_facts(normalize(CHAT))
     assert f.operator_first_turn == ["m4", "m5"]     # consecutive messages = one response

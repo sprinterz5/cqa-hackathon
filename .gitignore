@@ -6,6 +6,15 @@ data/
 __pycache__/
 *.pyc
 .venv/
+.asr_deps/
+.asr_models/
+.diarization_models/
+.speaker_cache/
+.speaker_deps/
+.translation_deps/
+.translation_models/
+.ollama_models/
+reference/
 # misc
 .DS_Store
 *.db
