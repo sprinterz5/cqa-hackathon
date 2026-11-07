@@ -42,6 +42,30 @@ def _whisper():
 
 
 @lru_cache(maxsize=1)
+def _kazakh_whisper():
+    _audio_imports()
+    from faster_whisper import WhisperModel
+    folder = Path(os.environ.get("LOCAL_KAZAKH_STT_MODEL",
+                                 str(ROOT / ".asr_models" / "kazakh-turbo-ct2")))
+    if not (folder / "model.bin").is_file():
+        raise RuntimeError("Казахская модель STT не найдена")
+    return WhisperModel(str(folder), device="cpu", compute_type="int8",
+                        cpu_threads=min(os.cpu_count() or 4, 8))
+
+
+@lru_cache(maxsize=1)
+def _language_whisper():
+    _audio_imports()
+    from faster_whisper import WhisperModel
+    folder = Path(os.environ.get("LOCAL_LANGUAGE_MODEL",
+                                 str(ROOT / ".asr_models" / "tiny-langid")))
+    if not (folder / "model.bin").is_file():
+        raise RuntimeError("Локальная модель определения языка не найдена")
+    return WhisperModel(str(folder), device="cpu", compute_type="int8",
+                        cpu_threads=min(os.cpu_count() or 4, 8))
+
+
+@lru_cache(maxsize=1)
 def _speaker_model():
     _audio_imports()
     try:
@@ -59,14 +83,49 @@ def _speaker_model():
 
 class LocalWhisperSTT:
     def transcribe(self, audio: Path, language: str | None) -> list[dict]:
+        _audio_imports()
+        from faster_whisper.audio import decode_audio
+        waveform = decode_audio(str(audio))
+        model = _whisper()
+        detector = _language_whisper()
         hint = {"RU": "ru", "KZ": "kk", "EN": "en"}.get((language or "").upper())
-        segments, info = _whisper().transcribe(
-            str(audio), language=hint, beam_size=1, best_of=1,
+        segments, info = model.transcribe(
+            waveform, language=hint, beam_size=1, best_of=1,
             condition_on_previous_text=False, vad_filter=True)
+        initial = list(segments)
         fallback = {"ru": "RU", "kk": "KZ", "en": "EN"}.get(info.language, "RU")
-        return [{"start": s.start, "end": s.end, "text": s.text.strip(),
-                 "source_language": detect_lang(s.text) or fallback}
-                for s in segments if s.text.strip()]
+        output = []
+        previous = fallback
+        for segment in initial:
+            start, end = max(0, int(segment.start * 16000)), min(len(waveform), int(segment.end * 16000))
+            clip = waveform[start:end]
+            text_language = detect_lang(segment.text)
+            chosen = text_language or previous
+            if len(clip) >= 16000:
+                acoustic, probability, _ = detector.detect_language(audio=clip)
+                if probability < 0.9 or acoustic not in ("ru", "kk", "en"):
+                    acoustic, probability, _ = model.detect_language(audio=clip)
+                if acoustic in ("ru", "kk", "en") and probability >= 0.55:
+                    chosen = {"ru": "RU", "kk": "KZ", "en": "EN"}[acoustic]
+            previous = chosen
+            rerun = chosen == "KZ" or (chosen != fallback and chosen in ("RU", "EN"))
+            if rerun and len(clip) >= 8000:
+                specialist = _kazakh_whisper() if chosen == "KZ" else model
+                code = {"RU": "ru", "KZ": "kk", "EN": "en"}[chosen]
+                better, _ = specialist.transcribe(
+                    clip, language=code, beam_size=1, best_of=1,
+                    condition_on_previous_text=False, vad_filter=False)
+                replacements = [s for s in better if s.text.strip()]
+            else:
+                replacements = []
+            if replacements:
+                output.extend({"start": segment.start + s.start, "end": segment.start + s.end,
+                               "text": s.text.strip(), "source_language": chosen}
+                              for s in replacements)
+            elif segment.text.strip():
+                output.append({"start": segment.start, "end": segment.end,
+                               "text": segment.text.strip(), "source_language": chosen})
+        return output
 
 
 class AlemSTT:
@@ -75,8 +134,12 @@ class AlemSTT:
 
 
 def modes() -> dict:
+    kazakh = (ROOT / ".asr_models" / "kazakh-turbo-ct2" / "model.bin").is_file()
+    language_model = (ROOT / ".asr_models" / "tiny-langid" / "model.bin").is_file()
     return {"local": {"available": (ROOT / ".asr_models" / "large-v3").is_dir()
-             and (ROOT / ".diarization_models" / "speechbrain-ecapa").is_dir()},
+             and (ROOT / ".diarization_models" / "speechbrain-ecapa").is_dir()
+             and kazakh and language_model,
+             "kazakh_available": kazakh, "language_model_available": language_model},
             "cloud": {"available": False, "reason": "Ожидаются ключ и формат Alem STT"}}
 
 
