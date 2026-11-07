@@ -339,8 +339,8 @@
       const started = await response.json();
       if (!response.ok) throw new Error(started.detail || response.statusText);
       const labels = { queued: "В очереди", recognizing: "Распознавание речи", separating: "Разделение голосов",
-        parsing: "Определение ролей", saving: "Сохранение диалога" };
-      const widths = { queued: 15, recognizing: 35, separating: 65, parsing: 78, saving: 90 };
+        translating: "Перевод на русский", parsing: "Определение ролей", saving: "Сохранение диалога" };
+      const widths = { queued: 15, recognizing: 35, separating: 65, translating: 75, parsing: 82, saving: 90 };
       let job;
       do {
         await new Promise((resolve) => setTimeout(resolve, 1200));
