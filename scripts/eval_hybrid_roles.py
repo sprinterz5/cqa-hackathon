@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import re
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -13,9 +14,14 @@ sys.path.insert(0, str(ROOT))
 
 from cqa.llm import LLMClient, Provider, load_env
 from cqa.transcript import normalize
+from hybrid_role_fallback import predict_groups
 
 AUDIO = ROOT / "data" / "DEV" / "audio"
 ROLES = {"operator", "client", "bot"}
+OPERATOR_INTRO = re.compile(
+    r"\b(?:чем\s+(?:я\s+)?могу\s+(?:вам\s+)?помочь|могу\s+(?:вам\s+)?помочь)\b",
+    re.IGNORECASE,
+)
 
 
 def grouped_prompt(messages: list[dict]) -> tuple[list[str], str]:
@@ -56,6 +62,30 @@ def parse_roles(content: str, speaker_ids: list[str]) -> dict[str, str]:
     return {speaker_ids[number - 1]: numbered[number] for number in numbered}
 
 
+def refine_roles(messages: list[dict], llm_roles: dict[str, str]) -> dict[str, str]:
+    """Override a group only for an explicit operator greeting in its own text."""
+    roles = dict(llm_roles)
+    for message in messages:
+        sid = message["speaker_id"]
+        if roles.get(sid) != "bot" and OPERATOR_INTRO.search(message["text"]):
+            roles[sid] = "operator"
+    return roles
+
+
+def with_text_fallback(call_id: str, messages: list[dict], roles: dict[str, str]) -> dict[str, str]:
+    """Train only on other calls when this call has no bot or explicit operator intro."""
+    if "bot" in roles.values() or any(OPERATOR_INTRO.search(m["text"]) for m in messages):
+        return roles
+    records = json.loads((ROOT / "data" / "dev_source.json").read_text(encoding="utf-8"))["data"]["records"]
+    train = [(message.text, message.speaker)
+             for record in records if record.get("channel") == "voice call"
+             and record["conversation_id"] != call_id
+             for message in normalize(record).messages if message.speaker != "system"]
+    if not train:
+        return roles
+    return predict_groups(messages, train)
+
+
 async def infer() -> list[dict]:
     load_env()
     provider = Provider.from_env("LLM", "primary")
@@ -70,10 +100,12 @@ async def infer() -> list[dict]:
             data = json.loads(path.read_text(encoding="utf-8"))
             speaker_ids, prompt = grouped_prompt(data["messages"])
             response = await client.chat([{"role": "user", "content": prompt}], max_tokens=8000)
-            roles = parse_roles(response.content, speaker_ids)
+            raw_roles = parse_roles(response.content, speaker_ids)
+            roles = with_text_fallback(data["conversation_id"], data["messages"],
+                                       refine_roles(data["messages"], raw_roles))
             item = {"conversation_id": data["conversation_id"], "speaker_map": roles,
                     "asr_messages": data["messages"],
-                    "model": provider.model,
+                    "model": provider.model, "llm_speaker_map": raw_roles,
                     "calls": len(response.calls)}
             predicted.append(item)
             (AUDIO / f"{data['conversation_id']}.hybrid_roles.json").write_text(
@@ -92,6 +124,9 @@ def score(predictions: list[dict]) -> dict:
     calls = []
     for item in predictions:
         cid = item["conversation_id"]
+        (AUDIO / f"{cid}.refined_roles.json").write_text(
+            json.dumps({"conversation_id": cid, "speaker_map": item["speaker_map"]},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
         asr_record = {"conversation_id": cid, "channel": "voice call", "language": "RU",
                       "speaker_map": item["speaker_map"],
                       "transcript": [{"speaker": m["speaker_id"], "start": m["t"],
@@ -108,7 +143,7 @@ def score(predictions: list[dict]) -> dict:
              for name in ("gold_voice_replies", "aligned_gold_replies", "correct_gold_replies")}
     total["aligned_accuracy_pct"] = round(100 * total["correct_gold_replies"] /
                                           total["aligned_gold_replies"], 1)
-    output = {"method": "One full-text gpt-oss role label per acoustic voice group; same compare() alignment as E17",
+    output = {"method": "One full-text gpt-oss label per voice group; explicit operator-intro override; leave-one-call-out text fallback for calls without bot or intro; same compare() alignment as E17",
               "calls": calls, "totals": total}
     (AUDIO.parent / "hybrid_role_metrics.json").write_text(
         json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -122,7 +157,10 @@ def cached_predictions() -> list[dict]:
         cid = role_file.name.removesuffix(".roles.json")
         role_map = json.loads((AUDIO / f"{cid}.hybrid_roles.json").read_text(encoding="utf-8"))
         asr = json.loads(role_file.read_text(encoding="utf-8"))
-        predictions.append({"conversation_id": cid, "speaker_map": role_map["speaker_map"],
+        raw = role_map.get("llm_speaker_map", role_map["speaker_map"])
+        refined = refine_roles(asr["messages"], raw)
+        predictions.append({"conversation_id": cid,
+                            "speaker_map": with_text_fallback(cid, asr["messages"], refined),
                             "asr_messages": asr["messages"]})
     if len(predictions) != 5:
         raise RuntimeError("Expected five cached DEV calls")
