@@ -24,6 +24,8 @@
   const LABEL = { yes: "Да", no: "Нет", na: "N/A" };
   const TYPE_LABEL = { binary: "Да / Нет", scale: "Шкала", flag: "Флаг (без баллов)" };
   const SPEAKER = { client: "Клиент", operator: "Оператор", bot: "Бот", system: "Система" };
+  const speakerName = (m) => (SPEAKER[m.speaker] || m.speaker)
+    + (m.role_needs_review ? " · роль требует проверки" : "");
   const CHANNEL = { "agent chat": "Чат", "voice call": "Звонок" };
 
   // ---------- helpers ----------
@@ -379,7 +381,7 @@
         h("div", { class: "meta" }, h("span", { class: "mid" }, m.id), fmtT(m.t),
           isCall && m.t != null ? h("div", null, h("button", { class: "play", title: "Воспроизвести с этого места", onclick: () => playAt(m) }, "▶")) : null),
         h("div", null,
-          h("div", { class: "who" }, SPEAKER[m.speaker] || m.speaker, hold ? " · на удержании (клиент не слышит)" : ""),
+          h("div", { class: "who" }, speakerName(m), hold ? " · на удержании (клиент не слышит)" : ""),
           h("div", { class: "text" }, m.text)));
       msgEls[m.id] = el;
       return el;
@@ -634,7 +636,7 @@
         frag.replaceChildren(h("div", { class: "small muted" }, "Фрагмент диалога (основание выделено)"),
           ...show.map((i) => { const m = msgs[i - 1]; return h("div", { class: `msg ${m.speaker}${ids.has(i) ? " ev" : ""}` },
             h("div", { class: "meta" }, h("span", { class: "mid" }, m.id)),
-            h("div", null, h("div", { class: "who" }, SPEAKER[m.speaker]), h("div", { class: "text" }, m.text))); }));
+          h("div", null, h("div", { class: "who" }, speakerName(m)), h("div", { class: "text" }, m.text))); }));
         if (a.status === "open" && state.role === "reviewer" && data.evaluation) {
           const crit = data.evaluation.checklist.criteria.find((c) => c.id === a.criterion_id) || {};
           card.appendChild(decisionForm(a, crit, null, () => { route(); }));

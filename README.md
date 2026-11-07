@@ -51,6 +51,12 @@ Screens: dialogs (fetch by `group_id`, upload, batch evaluation with progress), 
 
 Import results of a CLI run into the app: `.venv/bin/python scripts/import_evals.py DEV`.
 
+## ASR segments
+
+`cqa.transcript.normalize()` accepts DEV transcripts and ASR segments with `speaker`, `start`, `end` (seconds), `source_language`, `text`, and `translation_ru`. The original text and Russian translation are stored separately.
+
+For ASR speaker IDs, roles are assigned in this order: explicit `speaker_map`, labeled `reference_transcript`, then dialogue context. Common labels (`agent`, `customer`, `ivr`, …) map directly; a line without a speaker is a system line. The original ID stays in `speaker_id`; the output role is `client`, `operator`, `bot`, or `system`. Context-based assignments have `role_source="context"` and `role_needs_review=true` (shown in the UI). This contextual baseline still needs training and validation on labeled calls.
+
 ## Results for the organizers
 
 `results/dev/results.json` and `results/prod/results.json` follow the organizers' format (schema 1.0): one record per dialog, 8 criteria (`contact`, `discovery`, `identification`, `consultation`, `empathy`, `dialogue`, `closure`, `critical`), `evidence_turns` numbered from 1 over the original transcript, `final_score` from the deterministic scorer, `status: "error"` with a reason when a dialog could not be evaluated. Criterion codes come from `export_codes` in the checklist config.
