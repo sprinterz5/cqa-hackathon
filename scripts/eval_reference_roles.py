@@ -17,7 +17,7 @@ from eval_asr_roles import compare
 
 
 def main() -> None:
-    records = json.loads((ROOT / "data" / "dev_source.json").read_text(encoding="utf-8"))["data"]["records"]
+    records = json.loads(next(p for p in (ROOT / "data" / "dev_source.json", ROOT / "data" / "DEV" / "DEV_raw.json") if p.exists()).read_text(encoding="utf-8"))["data"]["records"]
     totals = {"gold_voice_replies": 0, "aligned_gold_replies": 0, "correct_gold_replies": 0}
     for source in sorted(records, key=lambda record: record["conversation_id"]):
         if source.get("channel") != "voice call":

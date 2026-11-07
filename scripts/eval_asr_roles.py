@@ -156,7 +156,7 @@ def compare(gold, predicted) -> dict:
 
 
 def main() -> None:
-    records = json.loads((ROOT / "data" / "dev_source.json").read_text(encoding="utf-8"))["data"]["records"]
+    records = json.loads(next(p for p in (ROOT / "data" / "dev_source.json", ROOT / "data" / "DEV" / "DEV_raw.json") if p.exists()).read_text(encoding="utf-8"))["data"]["records"]
     calls = sorted((record for record in records if record.get("channel") == "voice call"),
                    key=lambda record: record["conversation_id"])
     torch.set_num_threads(6)

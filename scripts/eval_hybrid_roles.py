@@ -76,7 +76,7 @@ def with_text_fallback(call_id: str, messages: list[dict], roles: dict[str, str]
     """Train only on other calls when this call has no bot or explicit operator intro."""
     if "bot" in roles.values() or any(OPERATOR_INTRO.search(m["text"]) for m in messages):
         return roles
-    records = json.loads((ROOT / "data" / "dev_source.json").read_text(encoding="utf-8"))["data"]["records"]
+    records = json.loads(next(p for p in (ROOT / "data" / "dev_source.json", ROOT / "data" / "DEV" / "DEV_raw.json") if p.exists()).read_text(encoding="utf-8"))["data"]["records"]
     train = [(message.text, message.speaker)
              for record in records if record.get("channel") == "voice call"
              and record["conversation_id"] != call_id
@@ -119,7 +119,7 @@ def score(predictions: list[dict]) -> dict:
     # The reference is opened only after all five LLM predictions have been saved.
     from eval_asr_roles import compare
 
-    records = json.loads((ROOT / "data" / "dev_source.json").read_text(encoding="utf-8"))["data"]["records"]
+    records = json.loads(next(p for p in (ROOT / "data" / "dev_source.json", ROOT / "data" / "DEV" / "DEV_raw.json") if p.exists()).read_text(encoding="utf-8"))["data"]["records"]
     gold_by_id = {record["conversation_id"]: record for record in records}
     calls = []
     for item in predictions:

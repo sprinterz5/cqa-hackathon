@@ -12,7 +12,7 @@ sys.path.insert(0, str(root / "scripts"))
 from cqa.transcript import normalize
 from eval_asr_roles import compare
 
-records = {d["conversation_id"]: d for d in json.loads((root / "data/dev_source.json").read_text(encoding="utf-8"))["data"]["records"] if d.get("channel") == "voice call"}
+records = {d["conversation_id"]: d for d in json.loads(next(p for p in (root / "data" / "dev_source.json", root / "data" / "DEV" / "DEV_raw.json") if p.exists()).read_text(encoding="utf-8"))["data"]["records"] if d.get("channel") == "voice call"}
 
 
 def features(text):
