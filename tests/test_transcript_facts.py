@@ -39,9 +39,22 @@ def test_chat_facts():
     assert f.bot_before_operator and f.handoff_id == "m3"
     assert f.client_before_operator == ["m1"]
     assert f.end_type == "operator_closed" and f.end_id == "m8"
-    # the 2:37 wait before the first response is excluded; the 90 s wait after it is reported
-    assert [(g.from_id, g.to_id, g.seconds) for g in f.waits] == [("m6", "m7", 90.0)]
     assert "m4, m5" in facts_to_prompt(f)
+    # the 2:37 wait before the first response is excluded; the 90 s wait after it is reported
+    f60 = extract_facts(normalize(CHAT), chat_wait=60)
+    assert [(g.from_id, g.to_id, g.seconds) for g in f60.waits] == [("m6", "m7", 90.0)]
+    assert f.waits == []  # default threshold is 120 s
+
+
+def test_wait_is_measured_from_the_latest_client_message():
+    chat = rec([
+        ("00:00", "operator", "Здравствуйте, я Дана."),
+        ("00:10", "client", "Вопрос."),
+        ("01:40", "client", "Ещё вопрос."),
+        ("02:00", "operator", "Ответ."),
+    ])
+    f = extract_facts(normalize(chat), chat_wait=60)
+    assert f.waits == []  # 20 s after the latest message, not 110 s after the first one
 
 
 def test_event_classification_three_languages():

@@ -57,7 +57,7 @@ PII_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("email", re.compile(r"[\w.+\-]+@[\w\-]+\.[\w.\-]+")),
 ]
 
-CHAT_WAIT_THRESHOLD = 60.0    # s: client waited this long for an operator reply
+CHAT_WAIT_THRESHOLD = 120.0   # s: client waited this long for an operator reply
 CALL_SILENCE_THRESHOLD = 20.0  # s: pause before an operator utterance in a call
 
 
@@ -144,7 +144,7 @@ def extract_facts(d: Dialog, chat_wait: float = CHAT_WAIT_THRESHOLD,
     closing = [e for e in events if e.type in CLOSING]
     end_type, end_id = (closing[-1].type, closing[-1].message_id) if closing else ("open", None)
 
-    # chats: client message -> next operator message, after the operator's first response
+    # chats: the client's LAST message before an operator reply -> that reply (after the first response)
     waits: list[Gap] = []
     silences: list[Gap] = []
     holds: list[Gap] = []
@@ -153,8 +153,8 @@ def extract_facts(d: Dialog, chat_wait: float = CHAT_WAIT_THRESHOLD,
         if not d.is_call:
             pending: Message | None = None
             for m in msgs[after_first:]:
-                if m.speaker == "client" and pending is None:
-                    pending = m
+                if m.speaker == "client":
+                    pending = m  # measure from the latest client message, not the first unanswered one
                 elif m.speaker == "operator" and pending is not None:
                     g = _gap(pending, m)
                     if g is not None and g >= chat_wait:
@@ -241,7 +241,8 @@ def facts_to_prompt(f: Facts) -> str:
     if f.last_operator_id:
         lines.append(f"- Последняя реплика оператора: {f.last_operator_id}.")
     for g in f.waits:
-        lines.append(f"- Клиент ждал ответа оператора {int(g.seconds)} с: от {g.from_id} до {g.to_id}.")
+        lines.append(f"- Пауза {int(g.seconds)} с между сообщением клиента {g.from_id} и ответом оператора {g.to_id}. "
+                     "Сама по себе пауза не нарушение: учитывайте её, только если оператор брал время на проверку и не предупредил клиента.")
     for g in f.holds:
         lines.append(f"- Клиент на удержании {int(g.seconds)} с: {g.from_id}–{g.to_id}. Реплики в этом "
                      "интервале помечены [HOLD]: это консультация оператора с коллегами, клиент их не слышит; "

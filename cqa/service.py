@@ -16,7 +16,7 @@ import httpx
 
 from .checklist import Checklist
 from .evaluator import CriterionEvaluation, Evaluator, score_evaluations
-from .facts import extract_facts
+from .facts import extract_facts, facts_to_prompt
 from .llm import LLMClient, Provider, load_env, providers_from_env
 from .prompts import PROMPT_VERSION
 from .scoring import ScoringError, Verdict, score, validate_verdict
@@ -37,6 +37,8 @@ def cache_key(checklist: Checklist, criterion_id: str, record: dict, models: lis
         "criterion": c.model_dump(mode="json", exclude={"enabled"}),
         "rules": checklist.general_rules, "context": checklist.company_context or "",
         "channel": record.get("channel"), "transcript": record.get("transcript"),
+        # facts are part of the prompt: if their computation changes, results must not come from the cache
+        "facts": facts_to_prompt(extract_facts(normalize(record))),
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 

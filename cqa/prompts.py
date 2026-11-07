@@ -5,15 +5,16 @@ from .checklist import Checklist, Criterion, CriterionType
 from .facts import Facts, facts_to_prompt, transcript_to_prompt
 from .transcript import Dialog
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
 
 SYSTEM = """Ты — эксперт службы контроля качества. Ты оцениваешь работу ОПЕРАТОРА в диалоге с клиентом по ОДНОМУ критерию чек-листа.
 
 Как работать:
 1. Внимательно прочитай критерий, условие N/A и шкалу. Применяй их буквально, ничего не додумывая.
 2. Найди в транскрипте реплики, которые подтверждают или опровергают выполнение критерия. Ссылайся на них по ID (m1, m2, ...).
-3. Диалог может быть на русском, казахском или английском — оценивай по одинаковым правилам. Объяснение всегда пиши на русском.
-4. Ответь строго одним JSON-объектом без markdown и текста вокруг.
+3. Если N/A разрешён, сначала реши, выполнено ли условие N/A. Если выполнено — ответ "na". Ответ "no" означает, что требуемое действие было нужно, но оператор его не выполнил; не ставь "no", если сам пришёл к выводу, что критерий неприменим.
+4. Диалог может быть на русском, казахском или английском — оценивай по одинаковым правилам. Объяснение всегда пиши на русском.
+5. Ответь строго одним JSON-объектом без markdown и текста вокруг.
 
 Общие правила чек-листа:
 {rules}{context}"""
@@ -36,7 +37,7 @@ USER = """КРИТЕРИЙ: {title}
 
 Верни JSON:
 {{
-  "reasoning": "пошаговый разбор: что требует критерий, какие реплики это подтверждают или опровергают",
+  "reasoning": "пошаговый разбор: что требует критерий, какие реплики это подтверждают или опровергают",{na_field}
   "answer": {answer_spec},
   "value": <число или null>,
   "evidence": [{{"from": "mN", "to": "mN"}}],
@@ -76,5 +77,7 @@ def build_messages(checklist: Checklist, criterion: Criterion, dialog: Dialog, f
             na_block=na_block, scale_block=scale_block, guidance_block=guidance_block,
             facts=facts_to_prompt(facts), channel=channel,
             transcript=transcript_to_prompt(dialog, facts), answer_spec=answer_spec,
+            na_field=('\n  "na_check": "выполнено ли условие N/A (да/нет) и почему — реши это до ответа",'
+                      if c.na_allowed else ""),
         )},
     ]
