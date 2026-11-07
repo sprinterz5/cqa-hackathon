@@ -82,22 +82,22 @@ def _round(x: Fraction, digits: int) -> float:
     return float(d)
 
 
-def _earned_fraction(c: Criterion, v: Verdict) -> Fraction | None:
+def validate_verdict(c: Criterion, v: Verdict) -> Fraction | None:
     """Validate a verdict and return the earned share of the weight (None for N/A)."""
     if v.answer == "na":
         if not c.na_allowed:
-            raise ScoringError(f"{c.id}: N/A is not allowed for this criterion")
+            raise ScoringError(f"{c.id}: N/A для этого критерия не допускается")
         return None
     if c.type == CriterionType.SCALE:
         if v.answer != "score" or v.value is None:
-            raise ScoringError(f"{c.id}: scale criterion needs answer='score' with a value")
+            raise ScoringError(f"{c.id}: для шкального критерия нужно выбрать ступень шкалы")
         steps = {_frac(s.value) for s in c.scale or []}
         if _frac(v.value) not in steps:
-            allowed = ", ".join(str(s.value) for s in c.scale or [])
-            raise ScoringError(f"{c.id}: {v.value} is not a scale step (allowed: {allowed})")
+            allowed = ", ".join(f"{s.value:g}" for s in c.scale or [])
+            raise ScoringError(f"{c.id}: {v.value:g} не является ступенью шкалы (допустимо: {allowed})")
         return _frac(v.value) / _frac(c.scale_max)
     if v.answer not in ("yes", "no"):
-        raise ScoringError(f"{c.id}: expected 'yes' or 'no', got '{v.answer}'")
+        raise ScoringError(f"{c.id}: ожидается «Да» или «Нет», получено «{v.answer}»")
     return Fraction(1) if v.answer == "yes" else Fraction(0)
 
 
@@ -110,12 +110,12 @@ def score(checklist: Checklist, verdicts: list[Verdict] | dict[str, Verdict]) ->
     criteria = checklist.active_criteria
     missing = [c.id for c in criteria if c.id not in by_id]
     if missing:
-        raise ScoringError(f"missing verdicts for: {', '.join(missing)}")
+        raise ScoringError(f"нет ответа по критериям: {', '.join(missing)}")
     unknown = set(by_id) - {c.id for c in criteria}
     if unknown:
-        raise ScoringError(f"verdicts for unknown or disabled criteria: {', '.join(sorted(unknown))}")
+        raise ScoringError(f"ответы по неизвестным или отключённым критериям: {', '.join(sorted(unknown))}")
 
-    earned: dict[str, Fraction | None] = {c.id: _earned_fraction(c, by_id[c.id]) for c in criteria}
+    earned: dict[str, Fraction | None] = {c.id: validate_verdict(c, by_id[c.id]) for c in criteria}
 
     weighted = [c for c in criteria if c.type != CriterionType.FLAG and c.weight > 0]
     applicable_weight = sum((_frac(c.weight) for c in weighted if earned[c.id] is not None), Fraction(0))

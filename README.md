@@ -28,3 +28,13 @@ Datasets are saved to `data/` and are not committed (they contain personal data)
 ```bash
 .venv/bin/python scripts/evaluate.py DEV p1-ru-001 --samples 1
 ```
+
+## Backend
+
+```bash
+.venv/bin/uvicorn app.main:app --port 8000
+```
+
+- `cqa/store.py` — SQLite (`data/cqa.db`): checklist versions, dialogs, evaluations, per-criterion cache, appeals, decisions.
+- `cqa/service.py` — dataset fetch by `group_id`, upload (API JSON or `Клиент: …` text), evaluation jobs with a per-criterion cache (replacing one criterion re-runs only that criterion), appeals and reviewer decisions (original vs. final score), audio link extraction, quality metrics.
+- `app/main.py` — REST API under `/api`, static UI from `web/`.

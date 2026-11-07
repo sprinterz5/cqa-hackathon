@@ -73,7 +73,7 @@ def test_na_not_allowed(cl):
 
 
 def test_value_must_be_a_scale_step(cl):
-    with pytest.raises(ScoringError, match="not a scale step"):
+    with pytest.raises(ScoringError, match="не является ступенью"):
         score(cl, v(**{**PERFECT, "c04": 12}))
 
 
