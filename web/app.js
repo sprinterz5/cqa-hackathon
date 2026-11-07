@@ -317,14 +317,64 @@
     const channel = h("select", null, h("option", { value: "agent chat" }, "Чат"), h("option", { value: "voice call" }, "Звонок"));
     const lang = h("select", null, ["RU", "KZ", "EN"].map((l) => h("option", { value: l }, l)));
     const file = h("input", { type: "file", accept: ".json,.txt", onchange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } });
+    const audioFile = h("input", { type: "file", accept: ".mp3,audio/mpeg" });
+    const audioLang = h("select", null, ["RU", "KZ", "EN", "AUTO"].map((l) => h("option", { value: l }, l)));
+    const cloudReady = !!(state.health && state.health.stt && state.health.stt.cloud.available);
+    const audioMode = h("select", null,
+      h("option", { value: "local" }, "Локально"),
+      h("option", { value: "cloud", disabled: !cloudReady }, "Alem STT" + (cloudReady ? "" : " (ожидает ключ)")));
+    const progressLabel = h("span", { class: "small muted" });
+    const progressFill = h("div", { style: "width:0%" });
+    const progress = h("div", { class: "row" }, progressLabel, h("div", { class: "progress" }, progressFill));
+    function stage(label, percent) { progressLabel.textContent = label; progressFill.style.width = percent + "%"; }
+    async function uploadMp3() {
+      const chosen = audioFile.files[0];
+      if (!chosen) throw new Error("Выберите MP3-файл");
+      const params = new URLSearchParams({ mode: audioMode.value, language: audioLang.value });
+      if (id.value.trim()) params.set("conversation_id", id.value.trim());
+      stage("Загрузка записи", 10);
+      const response = await fetch(API + "/dialogs/upload-audio?" + params, {
+        method: "POST", headers: { "Content-Type": "audio/mpeg" }, body: chosen,
+      });
+      const started = await response.json();
+      if (!response.ok) throw new Error(started.detail || response.statusText);
+      const labels = { queued: "В очереди", recognizing: "Распознавание речи", separating: "Разделение голосов",
+        parsing: "Определение ролей", saving: "Сохранение диалога" };
+      const widths = { queued: 15, recognizing: 35, separating: 65, parsing: 78, saving: 90 };
+      let job;
+      do {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        job = await api("/audio-jobs/" + started.job_id);
+        stage(labels[job.stage] || "Обработка записи", widths[job.stage] || 20);
+      } while (job.status === "running");
+      if (job.status === "error") throw new Error(job.error || "Не удалось обработать запись");
+      stage("Диалог добавлен", 100);
+      return job.conversation_id;
+    }
     const close = modal(h("div", { class: "stack" },
       h("h2", null, "Добавить диалог"),
       h("div", { class: "sub" }, "Можно вставить JSON (одна запись, массив или весь ответ API) или текст «роль: реплика»."),
       file, ta,
+      h("div", { class: "sub" }, "Или загрузите MP3. Роли, определённые по фразам, потребуют проверки."),
+      audioFile,
+      h("div", { class: "row" }, h("label", { class: "field" }, "Распознавание", audioMode),
+        h("label", { class: "field" }, "Язык записи", audioLang)),
+      progress,
       h("div", { class: "row" }, id, channel, lang, h("span", { class: "spacer" }),
         h("button", { class: "btn", onclick: () => close() }, "Отмена"),
-        h("button", { class: "btn primary", onclick: async () => {
+        h("button", { class: "btn primary", onclick: async (event) => {
+          event.currentTarget.disabled = true;
           try {
+            if (audioFile.files.length) {
+              const cid = await uploadMp3();
+              if (state.provider === "local" || confirm("Оценка отправит транскрипт внешнему API. Разрешить?")) {
+                stage("Оценка по чек-листу", 95);
+                try { await runJob([cid]); } catch (e) { fail(e); }
+              }
+              close();
+              location.hash = "#/dialog/" + encodeURIComponent(cid);
+              return;
+            }
             const r = await api("/dialogs/upload", { method: "POST", body: {
               content: ta.value, conversation_id: id.value.trim() || null, channel: channel.value, language: lang.value } });
             close();
@@ -332,6 +382,7 @@
             if (r.conversation_ids.length === 1) location.hash = "#/dialog/" + encodeURIComponent(r.conversation_ids[0]);
             else { state.group = "UPLOAD"; store.set("group", "UPLOAD"); route(); }
           } catch (e) { fail(e); }
+          finally { event.currentTarget.disabled = false; }
         } }, "Добавить"))));
   }
 
