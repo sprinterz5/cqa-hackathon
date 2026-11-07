@@ -394,6 +394,8 @@
     const facts = data.facts;
     const ev = data.evaluation;
     const isCall = d.channel === "voice call";
+    const hasTranslation = isCall && d.messages.some((m) => m.translation_ru);
+    let showTranslation = store.get("showTranslation", false);
     const holdIds = new Set(facts.on_hold_ids || []);
     const msgEls = {};
     let audio = null;
@@ -426,17 +428,38 @@
     }
 
     // --- transcript ---
+    const translationEls = [];
     const transcript = h("div", { class: "transcript" }, d.messages.map((m) => {
       const hold = holdIds.has(m.id);
+      const translation = isCall && m.translation_ru
+        ? h("div", { class: "translation-ru", hidden: !showTranslation }, m.translation_ru)
+        : null;
+      if (translation) translationEls.push(translation);
       const el = h("div", { class: `msg ${m.speaker}${hold ? " hold" : ""}`, id: "msg-" + m.id },
         h("div", { class: "meta" }, h("span", { class: "mid" }, m.id), fmtT(m.t),
           isCall && m.t != null ? h("div", null, h("button", { class: "play", title: "Воспроизвести с этого места", onclick: () => playAt(m) }, "▶")) : null),
         h("div", null,
           h("div", { class: "who" }, speakerName(m), hold ? " · на удержании (клиент не слышит)" : ""),
-          h("div", { class: "text" }, m.text)));
+          h("div", { class: "text" }, m.text), translation));
       msgEls[m.id] = el;
       return el;
     }));
+    const originalBtn = h("button", { class: "btn", onclick: () => toggleTranslation(false) }, "Оригинал");
+    const translationBtn = h("button", { class: "btn", onclick: () => toggleTranslation(true) }, "Перевод");
+    function toggleTranslation(value) {
+      showTranslation = value;
+      store.set("showTranslation", value);
+      for (const el of translationEls) el.hidden = !value;
+      originalBtn.className = value ? "btn" : "btn primary";
+      translationBtn.className = value ? "btn primary" : "btn";
+      originalBtn.setAttribute("aria-pressed", String(!value));
+      translationBtn.setAttribute("aria-pressed", String(value));
+    }
+    toggleTranslation(showTranslation);
+    const translationSwitch = hasTranslation
+      ? h("div", { class: "translation-toggle", role: "group", "aria-label": "Отображение перевода" },
+        originalBtn, translationBtn)
+      : null;
     function fmtT(t) {
       if (t == null) return "";
       t = Math.round(t);
@@ -607,7 +630,7 @@
         d.language ? h("span", { class: "badge b-chan" }, d.language) : null,
         h("span", { class: "small muted" }, `${d.messages.length} реплик` + (facts.duration_s ? ` · ${fmtT(facts.duration_s)}` : ""))),
       h("div", { class: "split" },
-        h("div", { class: "panel sticky" }, audioBar, h("h2", null, "Транскрипт"), transcript),
+        h("div", { class: "panel sticky" }, audioBar, h("h2", null, "Транскрипт"), translationSwitch, transcript),
         right));
     renderEval(ev);
   };
