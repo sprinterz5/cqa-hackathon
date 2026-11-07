@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import os
 import sys
-import io
-import wave
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -12,6 +10,7 @@ from typing import Callable, Protocol
 
 from .facts import detect_lang
 from .llm import load_env
+from . import silence_audio
 from .transcript import normalize
 from .translation import available as translation_available, translate_segments
 
@@ -140,50 +139,31 @@ def _clip_language(clip, text_language: str | None, previous: str,
 
 class AlemSTT:
     def transcribe(self, audio: Path, language: str | None) -> list[dict]:
-        _audio_imports()
         load_env()
         import httpx
-        import numpy as np
-        from faster_whisper.audio import decode_audio
-        from faster_whisper.vad import VadOptions, get_speech_timestamps
-
-        waveform = decode_audio(str(audio))
-        regions = get_speech_timestamps(waveform, VadOptions(
-            max_speech_duration_s=9, min_silence_duration_ms=350, speech_pad_ms=100))
-        merged = []
-        for region in regions:
-            if merged and region["start"] - merged[-1]["end"] <= 12000 \
-                    and region["end"] - merged[-1]["start"] <= 9 * 16000:
-                merged[-1]["end"] = region["end"]
-            else:
-                merged.append(dict(region))
-        if not merged:
+        pcm = silence_audio.decode_pcm16(audio)
+        regions = silence_audio.speech_regions(pcm)
+        if not regions:
             return []
-        detector, fallback_model = _language_whisper(), _whisper()
         base = os.environ.get("STT_BASE_URL", "https://llm.alem.ai/v1").rstrip("/")
         result = []
-        previous = language or "RU"
+        chosen = language if language in ("RU", "KZ", "EN") else None
+        key = (os.environ.get("STT_KZ_API_KEY") if chosen == "KZ" else
+               os.environ.get("STT_EN_API_KEY") if chosen == "EN" and os.environ.get("STT_EN_API_KEY") else
+               os.environ.get("STT_API_KEY"))
+        if not key:
+            raise RuntimeError(f"Нет ключа Alem STT для {chosen or 'AUTO'}")
+        model = "speech-to-text-kk" if chosen == "KZ" else "speech-to-text"
         with httpx.Client(timeout=120) as client:
-            for region in merged:
-                clip = waveform[region["start"]:region["end"]]
-                chosen = _clip_language(clip, None, previous, detector, fallback_model)
-                previous = chosen
-                key = (os.environ.get("STT_KZ_API_KEY") if chosen == "KZ" else
-                       os.environ.get("STT_EN_API_KEY") if chosen == "EN" and os.environ.get("STT_EN_API_KEY") else
-                       os.environ.get("STT_API_KEY"))
-                if not key:
-                    raise RuntimeError(f"Нет ключа Alem STT для {chosen}")
-                model = "speech-to-text-kk" if chosen == "KZ" else "speech-to-text"
-                wav = io.BytesIO()
-                with wave.open(wav, "wb") as output:
-                    output.setnchannels(1)
-                    output.setsampwidth(2)
-                    output.setframerate(16000)
-                    output.writeframes((np.clip(clip, -1, 1) * 32767).astype("<i2").tobytes())
+            for number, region in enumerate(regions, 1):
+                clip = pcm[region["start"] * 2:region["end"] * 2]
+                data = {"model": model}
+                if chosen:
+                    data["language"] = {"RU": "ru", "KZ": "kk", "EN": "en"}[chosen]
                 response = client.post(base + "/audio/transcriptions",
                                        headers={"Authorization": "Bearer " + key},
-                                       files={"file": ("segment.wav", wav.getvalue(), "audio/wav")},
-                                       data={"model": model, "language": {"RU": "ru", "KZ": "kk", "EN": "en"}[chosen]})
+                                       files={"file": ("segment.wav", silence_audio.wav_bytes(clip), "audio/wav")},
+                                       data=data)
                 response.raise_for_status()
                 body = response.json()
                 start, end = region["start"] / 16000, region["end"] / 16000
@@ -192,10 +172,13 @@ class AlemSTT:
                         if isinstance(part, dict) and str(part.get("text") or "").strip():
                             result.append({"start": start + max(0, float(part.get("start", 0))),
                                            "end": min(end, start + float(part.get("end", end - start))),
-                                           "text": part["text"].strip(), "source_language": chosen})
+                                           "text": part["text"].strip(),
+                                           "source_language": chosen or detect_lang(part["text"]) or "RU",
+                                           "speaker_id": f"chunk_{number}"})
                 elif isinstance(body, dict) and str(body.get("text") or "").strip():
                     result.append({"start": start, "end": end, "text": body["text"].strip(),
-                                   "source_language": chosen})
+                                   "source_language": chosen or detect_lang(body["text"]) or "RU",
+                                   "speaker_id": f"chunk_{number}"})
                 else:
                     raise RuntimeError("Alem STT вернул ответ без текста")
         return result
@@ -211,9 +194,8 @@ def modes() -> dict:
     return {"local": {"available": support and kazakh,
              "kazakh_available": kazakh, "language_model_available": language_model,
              "translation_available": translation_available()},
-            "cloud": {"available": bool(support and os.environ.get("STT_API_KEY")
-                                        and os.environ.get("STT_KZ_API_KEY")),
-                      "reason": "Нужны STT_API_KEY, STT_KZ_API_KEY и локальные модули обработки"}}
+            "cloud": {"available": bool(silence_audio.available() and os.environ.get("STT_API_KEY")),
+                      "reason": "Нужны пакет av (PyAV) и STT_API_KEY; для KZ также STT_KZ_API_KEY"}}
 
 
 def _speaker_ids(audio: Path, segments: list[dict]) -> list[str]:
@@ -264,10 +246,14 @@ def process_audio(audio: Path, mode: str = "local", language: str | None = None,
     segments = backend.transcribe(audio, language)
     if not segments:
         raise ValueError("Речь в записи не обнаружена")
-    report("separating")
-    speaker_ids = _speaker_ids(audio, segments)
-    report("translating")
-    segments = translate_segments(segments)
+    if mode == "local":
+        report("separating")
+        speaker_ids = _speaker_ids(audio, segments)
+        report("translating")
+        segments = translate_segments(segments)
+    else:
+        # Silence chunks are not speaker identities; inferred roles need review.
+        speaker_ids = [segment["speaker_id"] for segment in segments]
     record = {"channel": "voice call", "language": language or "RU", "audio_url": None,
               "transcript": [{**segment, "speaker": speaker_ids[index]}
                              for index, segment in enumerate(segments)]}

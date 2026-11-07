@@ -57,6 +57,12 @@ Import results of a CLI run into the app: `.venv/bin/python scripts/import_evals
 
 For ASR speaker IDs, roles are assigned in this order: explicit `speaker_map`, labeled `reference_transcript`, then dialogue context. Common labels (`agent`, `customer`, `ivr`, …) map directly; a line without a speaker is a system line. The original ID stays in `speaker_id`; the output role is `client`, `operator`, `bot`, or `system`. Context-based assignments have `role_source="context"` and `role_needs_review=true` (shown in the UI). This contextual baseline still needs training and validation on labeled calls.
 
+## Audio modes
+
+Local mode (Python 3.12): `python scripts/install_audio.py` installs `requirements-audio.txt` and downloads six public models without an account. Downloads total about 6.8 GB: [Whisper large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) 3.09 GB, [Kazakh Whisper Turbo CT2](https://huggingface.co/globalizator/gzwhisper-kazakh-ct2-int8) 0.83 GB, [Whisper tiny](https://huggingface.co/Systran/faster-whisper-tiny) 0.08 GB, [SpeechBrain ECAPA](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb) 0.09 GB, [KazRush kk-ru](https://huggingface.co/deepvk/kazRush-kk-ru) 0.79 GB, and [M2M100 418M](https://huggingface.co/facebook/m2m100_418M) 1.94 GB. Allow additional space for Python packages. On this CPU, a 30-second DEV sample took 93 seconds end to end (about 186 seconds per audio minute); full-call speed has not been measured.
+
+Cloud mode needs `pip install av` (about 86 MB installed locally), `STT_API_KEY` and, for Kazakh, `STT_KZ_API_KEY`. PyAV decodes MP3 and a small energy-based splitter finds pauses. Cloud mode does not load Whisper, SpeechBrain or local translation models. Silence chunks are not speaker identities: inferred roles require review, and `translation_ru` is not produced. Uploading audio to Alem requires explicit permission in the UI.
+
 ## Results for the organizers
 
 `results/dev/results.json` and `results/prod/results.json` follow the organizers' format (schema 1.0): one record per dialog, 8 criteria (`contact`, `discovery`, `identification`, `consultation`, `empathy`, `dialogue`, `closure`, `critical`), `evidence_turns` numbered from 1 over the original transcript, `final_score` from the deterministic scorer, `status: "error"` with a reason when a dialog could not be evaluated. Criterion codes come from `export_codes` in the checklist config.
