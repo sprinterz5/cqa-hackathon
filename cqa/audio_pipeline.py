@@ -11,7 +11,7 @@ from typing import Callable, Protocol
 from .facts import detect_lang
 from .llm import load_env
 from . import silence_audio
-from .transcript import normalize
+from .transcript import SPEAKERS, normalize
 from .translation import available as translation_available, translate_segments
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -233,8 +233,21 @@ def _speaker_ids(audio: Path, segments: list[dict]) -> list[str]:
 
 
 def process_audio(audio: Path, mode: str = "local", language: str | None = None,
-                  progress: Progress | None = None) -> dict:
+                  progress: Progress | None = None,
+                  reference_transcript: list[dict] | None = None) -> dict:
     report = progress or (lambda _: None)
+    if mode not in ("local", "cloud"):
+        raise ValueError("Неизвестный режим STT")
+    if reference_transcript is not None:
+        if not reference_transcript or any(
+                not isinstance(message, dict) or message.get("speaker") not in SPEAKERS
+                for message in reference_transcript):
+            raise ValueError("Исходная расшифровка должна содержать роль каждой реплики")
+        record = {"channel": "voice call", "language": language or "RU", "audio_url": None,
+                  "transcript": [dict(message) for message in reference_transcript]}
+        report("parsing")
+        normalize(record)
+        return record
     backend: STTBackend
     if mode == "local":
         backend = LocalWhisperSTT()
