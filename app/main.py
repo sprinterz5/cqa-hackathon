@@ -146,11 +146,14 @@ def create_app(service: Service | None = None) -> FastAPI:
 
     @app.post("/api/dialogs/upload-audio")
     async def upload_audio(request: Request, mode: str = "local", language: str = "RU",
-                           conversation_id: str | None = None):
+                           conversation_id: str | None = None,
+                           approved_external_api: bool = False):
         if mode not in ("local", "cloud") or language not in ("RU", "KZ", "EN", "AUTO"):
             raise HTTPException(400, "Неверный режим STT или язык")
         if not stt_modes()[mode]["available"]:
             raise HTTPException(503, stt_modes()[mode].get("reason", "Локальный STT не настроен"))
+        if mode == "cloud" and not approved_external_api:
+            raise HTTPException(403, "Нужно разрешение на передачу аудио в Alem STT")
         cid = conversation_id or f"audio-{uuid.uuid4().hex[:10]}"
         if not SAFE_ID.fullmatch(cid):
             raise HTTPException(400, "Недопустимый ID диалога")

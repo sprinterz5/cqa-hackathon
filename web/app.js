@@ -330,7 +330,10 @@
     async function uploadMp3() {
       const chosen = audioFile.files[0];
       if (!chosen) throw new Error("Выберите MP3-файл");
+      if (audioMode.value === "cloud" &&
+          !confirm("Передать аудиозапись в Alem STT для распознавания?")) return null;
       const params = new URLSearchParams({ mode: audioMode.value, language: audioLang.value });
+      if (audioMode.value === "cloud") params.set("approved_external_api", "true");
       if (id.value.trim()) params.set("conversation_id", id.value.trim());
       stage("Загрузка записи", 10);
       const response = await fetch(API + "/dialogs/upload-audio?" + params, {
@@ -367,6 +370,7 @@
           try {
             if (audioFile.files.length) {
               const cid = await uploadMp3();
+              if (!cid) return;
               if (state.provider === "local" || confirm("Оценка отправит транскрипт внешнему API. Разрешить?")) {
                 stage("Оценка по чек-листу", 95);
                 try { await runJob([cid]); } catch (e) { fail(e); }
