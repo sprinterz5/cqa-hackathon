@@ -5,8 +5,17 @@ Freedom Broker CQA Hackathon prototype: configurable checklists, AI evaluation o
 ## Setup
 
 ```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 cp .env.example .env   # put the organizers' API URL (without group_id) into DATA_API_URL
-python3 scripts/fetch_dataset.py DEV
+.venv/bin/python scripts/fetch_dataset.py DEV
+.venv/bin/python -m pytest -q
 ```
 
 Datasets are saved to `data/` and are not committed (they contain personal data).
+
+## Structure
+
+- `checklists/freedom_default.json` — the 8 criteria from the organizers' checklist; criteria 1, 4, 6, 7 have `voice call` wording overrides.
+- `cqa/checklist.py` — checklist schema and validation (criteria types: `binary`, `scale`, `flag`; N/A rules; sections; channel overrides).
+- `cqa/scoring.py` — deterministic scoring: weights, N/A redistribution, half-up rounding, gross-violation flag. The LLM only returns verdicts.
