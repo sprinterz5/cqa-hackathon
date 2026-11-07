@@ -19,3 +19,5 @@ Datasets are saved to `data/` and are not committed (they contain personal data)
 - `checklists/freedom_default.json` — the 8 criteria from the organizers' checklist; criteria 1, 4, 6, 7 have `voice call` wording overrides.
 - `cqa/checklist.py` — checklist schema and validation (criteria types: `binary`, `scale`, `flag`; N/A rules; sections; channel overrides).
 - `cqa/scoring.py` — deterministic scoring: weights, N/A redistribution, half-up rounding, gross-violation flag. The LLM only returns verdicts.
+- `cqa/transcript.py` — normalization: message ids `m1..mN`, offsets in seconds (chat `MM:SS`, call ISO 8601), turns, plain-text upload parser.
+- `cqa/facts.py` — deterministic facts for the evaluator: system events (RU/KZ/EN), operator's first response, end type, long waits (chats), holds and pauses (calls); lines spoken while the client is on hold are tagged `[HOLD]`.
