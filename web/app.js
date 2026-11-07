@@ -422,10 +422,64 @@
 
     // --- evaluation panel ---
     const right = h("div", { class: "stack" });
+    const standardPanel = isCall ? h("div", { class: "panel" }) : null;
+    let standardResult = null;
+    let standardBusy = false;
+    function standardEvidence(ids) {
+      return (ids || []).map((id) => h("button", { class: "chip", onclick: () => jump(id, id, true) }, id));
+    }
+    function renderStandard(result, busy) {
+      if (!standardPanel) return;
+      standardResult = result;
+      standardBusy = busy;
+      standardPanel.replaceChildren(
+        h("div", { class: "row" }, h("h2", null, "Стандарт звонка"), h("span", { class: "spacer" }),
+          h("button", { class: "btn sm", disabled: busy, onclick: runStandard },
+            busy ? "Анализируется…" : result ? "Пересчитать" : "Анализировать")),
+        h("div", { class: "small muted" }, "Дополнительная аналитика; не влияет на оценку по чек-листу."),
+        busy ? h("div", { class: "small muted", style: "margin-top:10px" }, "Задача: анализ звонка моделью…") : null,
+        result ? h("div", { class: "stack", style: "margin-top:12px" },
+          h("div", { class: "scorebox" }, h("div", null, h("div", { class: "small muted" }, "Call Health Score"),
+            h("div", { class: "big" }, result.score == null ? "—" : fmt(result.score), h("small", null, " / 100"))),
+            h("span", { class: "badge " + (result.gross_violation.found ? "b-gross" : "b-score") }, result.status)),
+          result.preliminary ? h("div", { class: "small muted" }, "Балл предварительный: не хватает подтверждённых данных.") : null,
+          result.gross_violation.found ? h("div", { class: "decision" },
+            h("b", null, "Грубое нарушение: "), result.gross_violation.explanation,
+            h("div", { class: "chips" }, standardEvidence(result.gross_violation.evidence))) : null,
+          h("details", null, h("summary", null, "Восемь вопросов стандарта"),
+            result.questions.map((q) => h("div", { class: "crit", style: "margin-top:8px" },
+              h("div", { class: "row" }, h("b", null, `${q.number}. ${q.title}`), h("span", { class: "spacer" }),
+                h("span", { class: "badge b-score" }, q.answer)),
+              h("div", { class: "small muted" }, q.explanation),
+              h("div", { class: "chips" }, standardEvidence(q.evidence))))),
+          h("details", null, h("summary", null, `Вопросы клиента: ${result.issues.length}`),
+            result.issues.map((issue) => h("div", { class: "crit", style: "margin-top:8px" },
+              h("b", null, issue.title), h("div", { class: "small muted" }, issue.outcome),
+              h("div", { class: "chips" }, standardEvidence(issue.evidence)))))) :
+          !busy ? h("div", { class: "small muted", style: "margin-top:10px" }, "Анализ пока не выполнен.") : null);
+    }
+    async function runStandard() {
+      const external = state.provider !== "local";
+      if (external && !window.confirm("Передать транскрипт внешнему API для отдельного анализа стандарта звонка?")) return;
+      const previous = standardResult;
+      renderStandard(null, true);
+      try {
+        const response = await api(`/dialogs/${encodeURIComponent(cid)}/call-standard`, {
+          method: "POST", body: { provider: external ? "primary" : "local", approved_external_api: external } });
+        renderStandard(response.result, false);
+      } catch (e) { renderStandard(previous, false); fail(e); }
+    }
+    if (standardPanel) {
+      renderStandard(null, false);
+      api(`/dialogs/${encodeURIComponent(cid)}/call-standard`).then((r) => {
+        if (!standardBusy) renderStandard(r.result, false);
+      }).catch(fail);
+    }
     function renderEval(view) {
       if (!view) {
         right.replaceChildren(h("div", { class: "panel empty" }, "Диалог ещё не оценён по выбранному чек-листу.",
-          h("div", { style: "margin-top:12px" }, h("button", { class: "btn primary", onclick: reevaluate }, "Оценить"))));
+          h("div", { style: "margin-top:12px" }, h("button", { class: "btn primary", onclick: reevaluate }, "Оценить"))),
+          ...(standardPanel ? [standardPanel] : []));
         return;
       }
       const cl = view.checklist;
@@ -464,7 +518,7 @@
         h("div", { id: "job-box", style: "margin-top:8px" }));
 
       const cards = view.criteria.map((c) => criterionCard(c, critById[c.criterion_id] || {}, scoreById[c.criterion_id], sections, view));
-      right.replaceChildren(scorePanel, ...cards);
+      right.replaceChildren(scorePanel, ...cards, ...(standardPanel ? [standardPanel] : []));
       const focus = params.get("c");
       if (focus) {
         const el = document.getElementById("crit-" + focus);

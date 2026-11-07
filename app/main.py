@@ -15,8 +15,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from cqa.call_standard import analyze_call
 from cqa.service import Service, ServiceError
 from cqa.store import Store
+from cqa.transcript import normalize
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
@@ -41,6 +43,11 @@ class EvalBody(BaseModel):
     samples: int | None = None
     provider: str = "primary"
     force: bool = False
+
+
+class CallStandardBody(BaseModel):
+    provider: str = "primary"
+    approved_external_api: bool = False
 
 
 class AppealBody(BaseModel):
@@ -172,6 +179,35 @@ def create_app(service: Service | None = None) -> FastAPI:
         view["evaluation"] = s.evaluation_view(ev["id"]) if ev else None
         view["history"] = s.store.evaluation_history(conversation_id)
         return view
+
+    @app.get("/api/dialogs/{conversation_id}/call-standard")
+    def get_call_standard(conversation_id: str):
+        row = svc().store.get_dialog(conversation_id)
+        if not row:
+            raise HTTPException(404, "Диалог не найден")
+        return {"result": svc().store.get_call_standard(conversation_id)}
+
+    @app.post("/api/dialogs/{conversation_id}/call-standard")
+    async def run_call_standard(conversation_id: str, body: CallStandardBody):
+        s = svc()
+        row = s.store.get_dialog(conversation_id)
+        if not row:
+            raise HTTPException(404, "Диалог не найден")
+        dialog = normalize(row["raw"])
+        if not dialog.is_call:
+            raise HTTPException(400, "Стандарт применим только к звонкам")
+        if body.provider not in ("primary", "local"):
+            raise HTTPException(400, "Неизвестный провайдер")
+        if body.provider != "local" and not body.approved_external_api:
+            raise HTTPException(403, "Нужно разрешение на передачу транскрипта внешнему API")
+        chain = s._chain(body.provider)
+        async with s.client_factory(chain) as client:
+            try:
+                result = await analyze_call(dialog, client)
+            except ValueError as exc:
+                raise ServiceError(str(exc)) from exc
+        s.store.save_call_standard(conversation_id, result)
+        return {"result": s.store.get_call_standard(conversation_id)}
 
     @app.get("/api/dialogs/{conversation_id}/audio")
     async def audio(conversation_id: str):
