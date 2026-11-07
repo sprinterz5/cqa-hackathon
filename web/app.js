@@ -54,7 +54,7 @@
 
   async function api(path, opts) {
     const o = Object.assign({ headers: {} }, opts || {});
-    if (o.body && typeof o.body !== "string") { o.body = JSON.stringify(o.body); o.headers["Content-Type"] = "application/json"; }
+    if (o.body && typeof o.body !== "string" && !(o.body instanceof Blob)) { o.body = JSON.stringify(o.body); o.headers["Content-Type"] = "application/json"; }
     const r = await fetch(API + path, o);
     let data = null;
     try { data = await r.json(); } catch (e) { /* empty */ }
@@ -177,7 +177,7 @@
     if (state.group && !groups.includes(state.group)) state.group = "";
     let dialogs = await api("/dialogs?" + new URLSearchParams(Object.assign(
       { checklist_id: state.checklistId }, state.group ? { group_id: state.group } : {})));
-    const filter = { q: "", channel: "", flagged: false };
+    const filter = { q: "", channel: "", flagged: "" };
     const selected = new Set();
     state.health = state.health || await api("/health");
 
@@ -189,10 +189,12 @@
       return dialogs.filter((d) => {
         if (filter.q && !d.conversation_id.toLowerCase().includes(filter.q.toLowerCase())) return false;
         if (filter.channel && d.channel !== filter.channel) return false;
-        if (filter.flagged) {
-          const e = d.evaluation;
-          if (!e || !(e.gross_violation || e.needs_review.length || e.low_confidence.length || e.open_appeals)) return false;
-        }
+        const e = d.evaluation;
+        if (filter.flagged === "attention" && !(e && (e.gross_violation || e.needs_review.length || e.low_confidence.length || e.open_appeals))) return false;
+        if (filter.flagged === "gross" && !(e && e.gross_violation)) return false;
+        if (filter.flagged === "appeals" && !(e && e.open_appeals)) return false;
+        if (filter.flagged === "changed" && !(e && e.changed)) return false;
+        if (filter.flagged === "none" && e) return false;
         return true;
       });
     }
@@ -224,7 +226,8 @@
           h("td", { class: "num" }, d.messages),
           h("td", { class: "num total" }, e ? (e.total == null ? "—" : fmt(e.total)) : h("span", { class: "muted" }, "не оценён")),
           h("td", { class: "num total" }, e && e.final_total !== e.total ? fmt(e.final_total) : ""),
-          h("td", null, h("div", { class: "chips" }, flags)),
+          h("td", null, h("div", { class: "chips" }, flags),
+            e && e.gross_violation && e.gross_reason ? h("div", { class: "small gross-reason" }, e.gross_reason) : null),
           h("td", { class: "small muted" }, e ? `v${e.checklist_version}` : ""));
       }));
       if (!rows.length) tbody.replaceChildren(h("tr", null, h("td", { colspan: 9, class: "empty" }, "Нет диалогов. Загрузите набор по group_id или добавьте диалог.")));
@@ -278,7 +281,9 @@
         h("div", null, h("h1", null, "Диалоги"), h("div", { class: "sub" }, "Выберите диалоги и запустите оценку по чек-листу")),
         h("span", { class: "spacer" }),
         groupInput, fetchBtn,
-        h("button", { class: "btn", onclick: uploadDialog }, "Добавить диалог"), exportBtn),
+        h("button", { class: "btn", onclick: () => uploadDialog("text") }, "Добавить диалог"),
+        h("button", { class: "btn", onclick: () => uploadDialog("audio"), title: "mp3, wav, m4a, ogg: распознавание речи, роли, оценка" }, "Загрузить запись звонка"),
+        exportBtn),
       h("div", { class: "panel", style: "margin-bottom:12px" },
         h("div", { class: "row" },
           h("label", { class: "field" }, "Набор",
@@ -298,7 +303,13 @@
           h("input", { placeholder: "Поиск по ID", oninput: (e) => { filter.q = e.target.value; renderRows(); } }),
           h("select", { onchange: (e) => { filter.channel = e.target.value; renderRows(); } },
             h("option", { value: "" }, "Все каналы"), h("option", { value: "agent chat" }, "Чаты"), h("option", { value: "voice call" }, "Звонки")),
-          h("label", { class: "check" }, h("input", { type: "checkbox", onchange: (e) => { filter.flagged = e.target.checked; renderRows(); } }), "Только требующие внимания"),
+          h("select", { onchange: (e) => { filter.flagged = e.target.value; renderRows(); } },
+            h("option", { value: "" }, "Все отметки"),
+            h("option", { value: "gross" }, "Грубые ошибки"),
+            h("option", { value: "attention" }, "Требуют внимания"),
+            h("option", { value: "appeals" }, "С открытой апелляцией"),
+            h("option", { value: "changed" }, "Изменены проверяющим"),
+            h("option", { value: "none" }, "Не оценены")),
           h("span", { class: "spacer" }), countEl),
         h("table", { class: "table" },
           h("thead", null, h("tr", null,
@@ -311,28 +322,130 @@
     renderJob();
   };
 
-  function uploadDialog() {
-    const ta = h("textarea", { rows: 12, placeholder: "JSON записи в формате API организаторов\nили текст построчно:\n00:01 Клиент: Здравствуйте, не проходит вывод\n00:40 Оператор: Здравствуйте, меня зовут Дана…" });
-    const id = h("input", { placeholder: "ID диалога (необязательно)" });
-    const channel = h("select", null, h("option", { value: "agent chat" }, "Чат"), h("option", { value: "voice call" }, "Звонок"));
-    const lang = h("select", null, ["RU", "KZ", "EN"].map((l) => h("option", { value: l }, l)));
-    const file = h("input", { type: "file", accept: ".json,.txt", onchange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } });
-    const close = modal(h("div", { class: "stack" },
-      h("h2", null, "Добавить диалог"),
-      h("div", { class: "sub" }, "Можно вставить JSON (одна запись, массив или весь ответ API) или текст «роль: реплика»."),
-      file, ta,
-      h("div", { class: "row" }, id, channel, lang, h("span", { class: "spacer" }),
-        h("button", { class: "btn", onclick: () => close() }, "Отмена"),
-        h("button", { class: "btn primary", onclick: async () => {
-          try {
-            const r = await api("/dialogs/upload", { method: "POST", body: {
-              content: ta.value, conversation_id: id.value.trim() || null, channel: channel.value, language: lang.value } });
-            close();
-            toast("Добавлено: " + r.conversation_ids.join(", "));
-            if (r.conversation_ids.length === 1) location.hash = "#/dialog/" + encodeURIComponent(r.conversation_ids[0]);
-            else { state.group = "UPLOAD"; store.set("group", "UPLOAD"); route(); }
-          } catch (e) { fail(e); }
-        } }, "Добавить"))));
+  function uploadDialog(tab) {
+    const body = h("div");
+    const tabs = h("div", { class: "tabs" });
+    let close = () => {};
+    function show(which) {
+      tabs.replaceChildren(
+        h("button", { class: which === "text" ? "on" : "", onclick: () => show("text") }, "Текст или JSON"),
+        h("button", { class: which === "audio" ? "on" : "", onclick: () => show("audio") }, "Запись звонка"));
+      body.replaceChildren(which === "audio" ? audioForm() : textForm());
+    }
+
+    function textForm() {
+      const ta = h("textarea", { rows: 12, placeholder: "JSON записи в формате API организаторов\nили текст построчно:\n00:01 Клиент: Здравствуйте, не проходит вывод\n00:40 Оператор: Здравствуйте, меня зовут Дана…" });
+      const id = h("input", { placeholder: "ID диалога (необязательно)" });
+      const channel = h("select", null, h("option", { value: "agent chat" }, "Чат"), h("option", { value: "voice call" }, "Звонок"));
+      const lang = h("select", null, ["RU", "KZ", "EN"].map((l) => h("option", { value: l }, l)));
+      const file = h("input", { type: "file", accept: ".json,.txt", onchange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } });
+      return h("div", { class: "stack" },
+        h("div", { class: "sub" }, "Можно вставить JSON (одна запись, массив или весь ответ API) или текст «роль: реплика»."),
+        file, ta,
+        h("div", { class: "row" }, id, channel, lang, h("span", { class: "spacer" }),
+          h("button", { class: "btn", onclick: () => close() }, "Отмена"),
+          h("button", { class: "btn primary", onclick: async () => {
+            try {
+              const r = await api("/dialogs/upload", { method: "POST", body: {
+                content: ta.value, conversation_id: id.value.trim() || null, channel: channel.value, language: lang.value } });
+              close();
+              toast("Добавлено: " + r.conversation_ids.join(", "));
+              if (r.conversation_ids.length === 1) location.hash = "#/dialog/" + encodeURIComponent(r.conversation_ids[0]);
+              else { state.group = "UPLOAD"; store.set("group", "UPLOAD"); route(); }
+            } catch (e) { fail(e); }
+          } }, "Добавить")));
+    }
+
+    function audioForm() {
+      if (state.health && !state.health.stt) {
+        return h("div", { class: "panel empty" }, "Распознавание речи не настроено: добавьте STT_API_KEY в .env и перезапустите сервер.");
+      }
+      let picked = null;
+      const preview = h("div");
+      const input = h("input", { type: "file", accept: "audio/*,.mp3,.wav,.m4a,.ogg,.webm,.flac", style: "display:none",
+        onchange: (e) => pick(e.target.files[0]) });
+      const drop = h("div", { class: "drop", onclick: () => input.click(),
+        ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); },
+        ondragleave: () => drop.classList.remove("over"),
+        ondrop: (e) => { e.preventDefault(); drop.classList.remove("over"); pick(e.dataTransfer.files[0]); } },
+        h("b", null, "Перетащите запись звонка сюда"), h("div", { class: "small muted" }, "или нажмите, чтобы выбрать файл · mp3, wav, m4a, ogg, до 100 МБ"));
+      function pick(f) {
+        if (!f) return;
+        picked = f;
+        if (!id.value.trim()) id.value = f.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+        preview.replaceChildren(h("div", { class: "row small" }, h("b", null, f.name), h("span", { class: "muted" }, `${(f.size / 1048576).toFixed(1)} МБ`)),
+          h("audio", { controls: true, preload: "metadata", src: URL.createObjectURL(f), style: "width:100%;margin-top:6px" }));
+        go.disabled = false;
+      }
+      const id = h("input", { placeholder: "ID диалога (по имени файла)" });
+      const lang = h("select", null,
+        h("option", { value: "" }, "Язык: определить автоматически"),
+        h("option", { value: "RU" }, "Русский"), h("option", { value: "KZ" }, "Қазақша"), h("option", { value: "EN" }, "English"));
+      const cl = state.checklists.find((c) => c.id === state.checklistId);
+      const evalNow = h("input", { type: "checkbox", checked: true });
+      const steps = h("ol", { class: "steps" });
+      const go = h("button", { class: "btn primary", disabled: true, onclick: start }, "Распознать");
+
+      const STEPS = [["upload", "Загрузка файла"], ["stt", "Распознавание речи · Alem " + ((state.health && state.health.stt) || {}).model],
+        ["roles", "Кто говорит: оператор или клиент · " + (((state.health || {}).providers || {}).primary || {}).model], ["eval", "Оценка по чек-листу"]];
+      function renderSteps(current, error, extra) {
+        const order = STEPS.map((s) => s[0]).filter((s) => s !== "eval" || evalNow.checked);
+        const at = order.indexOf(current);
+        steps.replaceChildren(...order.map((key, i) => {
+          const label = STEPS.find((s) => s[0] === key)[1];
+          const cls = current === "done" || i < at ? "done" : i === at ? (error ? "err" : "on") : "";
+          return h("li", { class: cls }, label, i === at && extra ? h("span", { class: "small muted" }, " · " + extra) : null,
+            i === at && error ? h("div", { class: "small" }, error) : null);
+        }));
+      }
+
+      async function start() {
+        go.disabled = true; drop.style.pointerEvents = "none";
+        renderSteps("upload");
+        try {
+          const qsx = new URLSearchParams({ filename: picked.name });
+          if (lang.value) qsx.set("language", lang.value);
+          if (id.value.trim()) qsx.set("conversation_id", id.value.trim());
+          const { job_id } = await api("/dialogs/upload-audio?" + qsx, { method: "POST", body: picked,
+            headers: { "Content-Type": picked.type || "application/octet-stream" } });
+          let j;
+          for (;;) {
+            j = await api("/jobs/" + job_id);
+            if (j.status !== "running") break;
+            const sec = Math.round(Date.now() / 1000 - j.started_at);
+            renderSteps(j.stage, null, `${sec} с`);
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+          if (j.status === "error") throw Object.assign(new Error(j.error), { stage: j.stage });
+          const cid = j.conversation_id;
+          toast(`Распознано: ${j.lines} реплик за ${fmt(j.stt_s + j.roles_s, 1)} с` + (j.role_source === "ai" ? "" : " · роли угаданы по фразам, проверьте"), j.role_source !== "ai");
+          if (evalNow.checked) {
+            const t0 = Date.now();
+            const tick = () => renderSteps("eval", null, `${Math.round((Date.now() - t0) / 1000)} с`);
+            tick();
+            const timer = setInterval(tick, 1000);
+            try { await runJob([cid]); } finally { clearInterval(timer); }
+          }
+          renderSteps("done");
+          close();
+          location.hash = "#/dialog/" + encodeURIComponent(cid);
+        } catch (e) {
+          renderSteps(e.stage || "upload", e.message);
+          go.disabled = false; go.textContent = "Попробовать ещё раз"; drop.style.pointerEvents = "";
+        }
+      }
+
+      return h("div", { class: "stack" },
+        h("div", { class: "sub" }, "Запись расшифруется, система определит, где говорит оператор, а где клиент, и оценит звонок по чек-листу. Роли потом можно поправить в карточке."),
+        input, drop, preview,
+        h("div", { class: "row" }, id, lang),
+        h("label", { class: "check" }, evalNow, `Сразу оценить по чек-листу «${cl ? cl.name : state.checklistId}»`),
+        steps,
+        h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => close() }, "Отмена"), go));
+    }
+
+    close = modal(h("div", null, h("h2", null, "Добавить диалог"), tabs, body));
+    show(tab || "text");
   }
 
   // ---------- view: dialog card ----------
@@ -375,17 +488,63 @@
     }
 
     // --- transcript ---
+    // roles of uploaded recordings are AI guesses: the reviewer can fix them line by line
+    const asr = data.asr;
+    let rolesChanged = false;
+    const toReview = () => d.messages.filter((m) => m.role_needs_review).length;
+    function roleControl(m, el) {
+      const sel = h("select", { class: "role-select", title: "Поменять говорящего",
+        onchange: async (e) => {
+          const speaker = e.target.value;
+          sel.disabled = true;
+          try {
+            await api("/dialogs/" + encodeURIComponent(cid) + "/speaker", { method: "POST", body: { index: m.index, speaker } });
+            m.speaker = speaker; m.role_needs_review = false; m.role_source = "reviewer";
+            el.className = el.className.replace(/\b(client|operator|bot|system)\b/, speaker);
+            mark.replaceChildren(roleMark(m));
+            rolesChanged = true;
+            renderAsrNote();
+          } catch (err) { fail(err); e.target.value = m.speaker; } finally { sel.disabled = false; }
+        } }, ["operator", "client", "bot", "system"].map((r) => h("option", { value: r, selected: r === m.speaker }, SPEAKER[r])));
+      const mark = h("span", null, roleMark(m));
+      return h("span", { class: "who-edit" }, sel, mark);
+    }
+    function roleMark(m) {
+      if (m.role_source === "reviewer") return h("span", { class: "small muted", title: "Роль проверена человеком" }, " ✓");
+      // model roles are covered by the note above the transcript; only phrase-cue guesses are flagged per line
+      if (m.role_needs_review && m.role_source !== "ai") return h("span", { class: "badge b-warn", title: "Роль угадана по ключевым фразам" }, "проверьте");
+      return null;
+    }
     const transcript = h("div", { class: "transcript" }, d.messages.map((m) => {
       const hold = holdIds.has(m.id);
-      const el = h("div", { class: `msg ${m.speaker}${hold ? " hold" : ""}`, id: "msg-" + m.id },
+      const el = h("div", { class: `msg ${m.speaker}${hold ? " hold" : ""}`, id: "msg-" + m.id });
+      el.append(
         h("div", { class: "meta" }, h("span", { class: "mid" }, m.id), fmtT(m.t),
           isCall && m.t != null ? h("div", null, h("button", { class: "play", title: "Воспроизвести с этого места", onclick: () => playAt(m) }, "▶")) : null),
         h("div", null,
-          h("div", { class: "who" }, speakerName(m), hold ? " · на удержании (клиент не слышит)" : ""),
+          h("div", { class: "who" }, asr ? roleControl(m, el) : speakerName(m), hold ? " · на удержании (клиент не слышит)" : ""),
           h("div", { class: "text" }, m.text)));
       msgEls[m.id] = el;
       return el;
     }));
+
+    const asrNote = h("div");
+    function renderAsrNote() {
+      if (!asr) return;
+      const n = toReview();
+      const guessed = asr.role_source !== "ai";
+      const langNote = asr.language ? `${asr.language}${asr.language_source === "detected" ? " (определён автоматически)" : ""}` : "не определён";
+      asrNote.replaceChildren(h("div", { class: "asr-note" + (guessed && n || rolesChanged ? " warn" : "") },
+        h("div", null, h("b", null, "Расшифровано автоматически. "),
+          `Речь: Alem ${asr.stt_model}; кто говорит: ${guessed ? "угадано по ключевым фразам (модель не ответила)" : asr.roles_model}. `,
+          `Язык ${langNote} · ${fmtT(asr.duration_s)} записи · ${fmt(asr.stt_s + asr.roles_s, 1)} с на обработку.`),
+        n ? h("div", { style: "margin-top:4px" }, guessed
+          ? `Проверьте отмеченные роли (${n}): если подпись неверна, выберите правильную в списке у реплики.`
+          : "Роли расставила модель по смыслу реплик. Если подпись «Оператор» или «Клиент» неверна, выберите правильную в списке у реплики.") : null,
+        rolesChanged && right.querySelector(".scorebox") ? h("div", { class: "row", style: "margin-top:6px" },
+          h("span", null, "Роли изменены после оценки: баллы считались по старым ролям."), h("span", { class: "spacer" }),
+          h("button", { class: "btn sm primary", onclick: () => { rolesChanged = false; renderAsrNote(); reevaluate(); } }, "Оценить заново")) : null));
+    }
     function fmtT(t) {
       if (t == null) return "";
       t = Math.round(t);
@@ -409,15 +568,17 @@
         loadBtn.disabled = true;
         try {
           const a = await api("/dialogs/" + encodeURIComponent(cid) + "/audio");
-          audio = h("audio", { controls: true, preload: "metadata", src: a.src });
+          const src = /^(https?:)?\//.test(a.src) ? a.src : API + "/" + a.src;  // uploaded files are served by our API
+          audio = h("audio", { controls: true, preload: "metadata", src });
           holder.replaceChildren(audio);
           loadBtn.remove();
           audioBar.appendChild(h("div", { class: "row small muted", style: "margin-top:6px" },
-            "Клик по доказательству или ▶ у реплики перематывает запись. Сдвиг, с:", offsetInput,
-            h("a", { href: a.page, target: "_blank", rel: "noopener" }, "Открыть плеер организаторов")));
+            "Клик по доказательству или ▶ у реплики перематывает запись.",
+            a.page ? ["Сдвиг, с:", offsetInput, h("a", { href: a.page, target: "_blank", rel: "noopener" }, "Открыть плеер организаторов")] : null));
         } catch (e) { fail(e); loadBtn.disabled = false; }
       }
       audioBar = h("div", { class: "audio-bar" }, h("div", { class: "row" }, holder, h("span", { class: "spacer" }), loadBtn));
+      if (asr) setTimeout(loadAudio, 0);  // our own file: no short-lived link to fetch, load right away
     }
 
     // --- evaluation panel ---
@@ -556,9 +717,10 @@
         d.language ? h("span", { class: "badge b-chan" }, d.language) : null,
         h("span", { class: "small muted" }, `${d.messages.length} реплик` + (facts.duration_s ? ` · ${fmtT(facts.duration_s)}` : ""))),
       h("div", { class: "split" },
-        h("div", { class: "panel sticky" }, audioBar, h("h2", null, "Транскрипт"), transcript),
+        h("div", { class: "panel sticky" }, audioBar, asrNote, h("h2", null, "Транскрипт"), transcript),
         right));
     renderEval(ev);
+    renderAsrNote();
   };
 
   function decisionForm(appeal, crit, c, done) {
@@ -661,8 +823,11 @@
     function weightsInfo() {
       const active = cl.criteria.filter((c) => c.enabled !== false && c.type !== "flag");
       const sum = active.reduce((s, c) => s + (+c.weight || 0), 0);
+      const missing = exportProblems();
       status.replaceChildren(h("span", { class: "badge " + (sum === 100 ? "b-yes" : "b-warn") }, `Сумма весов: ${gnum(sum)}`),
-        h("span", { class: "small muted" }, sum !== 100 ? "Итог всё равно нормируется к 100, но исходные веса обычно дают 100." : ""));
+        h("span", { class: "small muted" }, sum !== 100 ? "Итог всё равно нормируется к 100, но исходные веса обычно дают 100." : ""),
+        missing.length ? h("span", { class: "badge b-warn", title: "В results.json для организаторов должны быть все 8 кодов" },
+          `results.json: нет кодов ${missing.join(", ")} — назначьте их критериям`) : h("span", { class: "badge b-yes" }, "results.json: все 8 кодов назначены"));
     }
 
     function render() {
@@ -714,13 +879,17 @@
           h("label", { class: "check small" }, h("input", { type: "checkbox", checked: c.enabled !== false, onchange: (e) => { c.enabled = e.target.checked; render(); } }), "включён"),
           h("button", { class: "btn sm", disabled: i === 0, onclick: () => { cl.criteria.splice(i - 1, 0, cl.criteria.splice(i, 1)[0]); render(); } }, "↑"),
           h("button", { class: "btn sm", disabled: i === cl.criteria.length - 1, onclick: () => { cl.criteria.splice(i + 1, 0, cl.criteria.splice(i, 1)[0]); render(); } }, "↓"),
-          h("button", { class: "btn sm danger", onclick: () => { if (confirm(`Удалить критерий «${c.title}»?`)) { cl.criteria.splice(i, 1); render(); } } }, "Удалить")),
+          h("button", { class: "btn sm danger", onclick: () => { if (confirm(`Удалить критерий «${c.title}»?` + (cl.export_codes[c.id] ? ` Код «${cl.export_codes[c.id]}» освободится — назначьте его новому критерию.` : ""))) { delete cl.export_codes[c.id]; cl.criteria.splice(i, 1); render(); } } }, "Удалить")),
         h("div", { class: "grid g5" },
-          field("ID", input(c, "id")),
+          field("ID", h("input", { value: c.id, oninput: (e) => {
+            const old = c.id; c.id = e.target.value;
+            if (cl.export_codes[old]) { cl.export_codes[c.id] = cl.export_codes[old]; delete cl.export_codes[old]; }
+          } })),
           field("Название", input(c, "title")),
           field("Секция", sectionSel),
           field("Тип ответа", typeSel),
           field("Вес", h("input", { type: "number", min: 0, value: c.weight, disabled: c.type === "flag", oninput: (e) => { c.weight = +e.target.value; weightsInfo(); } }))),
+        exportCodeField(c),
         h("div", { style: "margin-top:8px" }, field(c.type === "flag" ? "Что считается нарушением («Да»)" : "Что оценивается / когда ставится «Да»", textarea(c, "description", 2))),
         c.type !== "flag" ? h("div", { class: "row", style: "margin-top:8px;align-items:flex-start" },
           h("label", { class: "check", style: "margin-top:6px" }, h("input", { type: "checkbox", checked: !!c.na_allowed, onchange: (e) => { c.na_allowed = e.target.checked; render(); } }), "N/A разрешён"),
@@ -731,6 +900,39 @@
           h("summary", { class: "small", style: "cursor:pointer" }, "Формулировка для звонков" + (voice ? " (задана)" : " (как для чатов)")),
           voiceEditor(c)));
       return el;
+    }
+
+    // results.json for the organizers has exactly these 8 codes; a new criterion must take over one of them
+    const EXPORT_CODES = { contact: "Установление контакта", discovery: "Выявление потребности", identification: "Идентификация",
+      consultation: "Корректность и полнота", empathy: "Эмпатия", dialogue: "Ведение, скорость, грамотность",
+      closure: "Завершение", critical: "Грубые ошибки" };
+    const DEFAULT_CODES = { c01: "contact", c02: "discovery", c03: "identification", c04: "consultation",
+      c05: "empathy", c06: "dialogue", c07: "closure", c08: "critical" };
+    if (!cl.export_codes || !Object.keys(cl.export_codes).length) cl.export_codes = Object.assign({}, DEFAULT_CODES);
+    function exportCodeField(c) {
+      const codes = cl.export_codes;
+      const owner = (code) => cl.criteria.find((x) => x !== c && x.enabled !== false && codes[x.id] === code);
+      const sel = h("select", { onchange: (e) => {
+        const code = e.target.value;
+        if (code) {
+          const prev = owner(code);
+          if (prev && !confirm(`Код «${code}» сейчас у критерия «${prev.title}». Передать его этому критерию?`)) { e.target.value = codes[c.id] || ""; return; }
+          if (prev) delete codes[prev.id];
+          codes[c.id] = code;
+        } else delete codes[c.id];
+        render();
+      } }, h("option", { value: "" }, "— не выгружать"),
+        Object.entries(EXPORT_CODES).map(([code, title]) => {
+          const o = owner(code);
+          return h("option", { value: code, selected: codes[c.id] === code }, `${code} · ${title}` + (o ? ` (сейчас: ${o.id})` : ""));
+        }));
+      return h("div", { class: "row", style: "margin-top:8px" },
+        h("label", { class: "field", style: "min-width:320px" }, "Код в results.json для организаторов", sel),
+        !codes[c.id] && c.enabled !== false ? h("span", { class: "small", style: "color:var(--warn)" }, "Критерий не попадёт в results.json.") : null);
+    }
+    function exportProblems() {
+      const used = cl.criteria.filter((x) => x.enabled !== false).map((x) => cl.export_codes[x.id]).filter(Boolean);
+      return Object.keys(EXPORT_CODES).filter((code) => !used.includes(code));
     }
 
     function scaleEditor(c) {
@@ -770,6 +972,8 @@
 
     function clean(obj) {
       const out = JSON.parse(JSON.stringify(obj));
+      const ids = new Set(out.criteria.map((c) => c.id));
+      out.export_codes = Object.fromEntries(Object.entries(out.export_codes || {}).filter(([id]) => ids.has(id)));
       out.criteria.forEach((c) => {
         if (!c.na_allowed) c.na_condition = c.na_condition || null;
         ["guidance", "na_condition"].forEach((k) => { if (c[k] === "") c[k] = null; });

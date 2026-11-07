@@ -22,9 +22,13 @@ from .llm import LLMClient, Provider, load_env, providers_from_env
 from .prompts import PROMPT_VERSION
 from .scoring import ScoringError, Verdict, score, validate_verdict
 from .store import Store
-from .transcript import normalize, parse_plain_text
+from .stt import LANG_CODES, STTConfig, assign_roles, merge_segments, stt_from_env, transcribe
+from .transcript import SPEAKERS, normalize, parse_plain_text
 
 ROOT = Path(__file__).resolve().parent.parent
+AUDIO_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+               ".webm": "audio/webm", ".flac": "audio/flac"}
+MAX_AUDIO_BYTES = 100 * 1024 * 1024
 
 
 class ServiceError(ValueError):
@@ -46,11 +50,15 @@ def cache_key(checklist: Checklist, criterion_id: str, record: dict, models: lis
 
 class Service:
     def __init__(self, store: Store, providers: dict[str, Provider] | None = None,
-                 default_samples: int = 3, client_factory=None):
+                 default_samples: int = 3, client_factory=None, stt: STTConfig | None = None,
+                 transcriber=None, audio_dir: Path | None = None):
         self.store = store
         self.providers = providers if providers is not None else providers_from_env()
         self.default_samples = default_samples
         self.client_factory = client_factory or (lambda chain: LLMClient(chain))
+        self.stt = stt if stt is not None or providers is not None else stt_from_env()
+        self.transcriber = transcriber or transcribe
+        self.audio_dir = audio_dir or ROOT / "data" / "audio"
         self.jobs: dict[str, dict] = {}
 
     # ---------- checklists ----------
@@ -121,11 +129,15 @@ class Service:
         d = normalize(row["raw"])
         f = extract_facts(d)
         return {"group_id": row["group_id"], "dialog": d.model_dump(), "facts": f.model_dump(),
-                "has_audio": bool(d.audio_url)}
+                "has_audio": bool(d.audio_url or row["raw"].get("audio_file")),
+                "asr": row["raw"].get("asr")}
 
     async def audio_source(self, conversation_id: str) -> dict:
-        """The organizers' audio_url is an HTML player page with a short-lived mp3 link: extract it."""
+        """The organizers' audio_url is an HTML player page with a short-lived mp3 link: extract it.
+        Uploaded recordings are served by the API itself (src is relative to the API base)."""
         row = self.store.get_dialog(conversation_id)
+        if row and row["raw"].get("audio_file"):
+            return {"src": f"dialogs/{urllib.parse.quote(conversation_id)}/audio/file", "page": None}
         url = row and row["raw"].get("audio_url")
         if not url:
             raise ServiceError("у диалога нет записи")
@@ -138,6 +150,93 @@ class Service:
         if not m:
             raise ServiceError("не удалось найти ссылку на аудио на странице записи")
         return {"src": html.unescape(m.group(1)), "page": url}
+
+    def audio_file(self, conversation_id: str) -> tuple[Path, str]:
+        row = self.store.get_dialog(conversation_id)
+        name = row and row["raw"].get("audio_file")
+        path = self.audio_dir / name if name else None
+        if not path or not path.exists():
+            raise ServiceError("файл записи не найден")
+        return path, AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+    # ---------- uploaded call recordings: audio -> STT -> roles -> dialog ----------
+    def start_audio_job(self, data: bytes, filename: str, language: str | None = None,
+                        conversation_id: str | None = None, group_id: str = "UPLOAD") -> str:
+        if not self.stt:
+            raise ServiceError("распознавание речи не настроено (STT_API_KEY в .env)")
+        ext = Path(filename or "").suffix.lower()
+        if ext not in AUDIO_TYPES:
+            raise ServiceError(f"формат не поддерживается: {ext or 'без расширения'}; нужен "
+                               + ", ".join(AUDIO_TYPES))
+        if not data:
+            raise ServiceError("пустой файл")
+        if len(data) > MAX_AUDIO_BYTES:
+            raise ServiceError("файл больше 100 МБ")
+        language = (language or "").upper() or None
+        if language and language not in LANG_CODES:
+            raise ServiceError("язык: RU, KZ, EN или пусто (определить автоматически)")
+        cid = (conversation_id or "").strip() or f"call-{uuid.uuid4().hex[:6]}"
+        if not re.fullmatch(r"[\w.\-]{1,80}", cid):
+            raise ServiceError("ID диалога: буквы, цифры, «-», «_», «.»")
+        chain = self._chain("primary")
+        job_id = uuid.uuid4().hex[:10]
+        job = {"id": job_id, "kind": "audio", "status": "running", "stage": "stt", "conversation_id": cid,
+               "file": filename, "bytes": len(data), "started_at": time.time(), "finished_at": None,
+               "total": 1, "done": 0, "failed": [], "results": {}}
+        self.jobs[job_id] = job
+
+        async def run():
+            try:
+                self.audio_dir.mkdir(parents=True, exist_ok=True)
+                stored = f"{cid}{ext}"
+                (self.audio_dir / stored).write_bytes(data)
+                t0 = time.monotonic()
+                asr = await self.transcriber(self.stt, data, filename, language)
+                if not asr["segments"]:
+                    raise ServiceError("в записи не распознано ни одной фразы")
+                job["stt_s"] = round(time.monotonic() - t0, 1)
+                job["stage"] = "roles"
+                t0 = time.monotonic()
+                async with self.client_factory(chain) as client:
+                    roles, role_source, role_error = await assign_roles(client, asr["segments"])
+                job["roles_s"] = round(time.monotonic() - t0, 1)
+                lang = language or asr["language"]
+                record = {
+                    "conversation_id": cid, "channel": "voice call", "language": lang,
+                    "audio_url": None, "audio_file": stored,
+                    "transcript": merge_segments(asr["segments"], roles, role_source),
+                    "asr": {"stt_model": self.stt.model, "roles_model": chain[0].model if role_source == "ai" else None,
+                            "role_source": role_source, "role_error": role_error, "language": lang,
+                            "language_source": "user" if language else "detected", "file": filename,
+                            "duration_s": asr["duration"], "segments": len(asr["segments"]),
+                            "stt_s": job["stt_s"], "roles_s": job["roles_s"]},
+                }
+                self.store.upsert_dialog(record, group_id, "audio")
+                job.update(stage="done", status="done", done=1, language=lang, role_source=role_source,
+                           lines=len(record["transcript"]), duration_s=asr["duration"])
+            except Exception as e:
+                job.update(status="error", error=str(e)[:300])
+            finally:
+                job["finished_at"] = time.time()
+
+        job["task"] = asyncio.get_running_loop().create_task(run())
+        return job_id
+
+    def set_speaker(self, conversation_id: str, index: int, speaker: str) -> dict:
+        """A reviewer fixes the role of one transcript line (roles of uploaded recordings are AI guesses)."""
+        row = self.store.get_dialog(conversation_id)
+        if not row:
+            raise ServiceError(f"диалог {conversation_id} не найден")
+        if speaker not in SPEAKERS:
+            raise ServiceError("роль: client, operator, bot или system")
+        raw = json.loads(json.dumps(row["raw"]))
+        lines = raw.get("transcript") or []
+        if not 0 <= index < len(lines):
+            raise ServiceError("нет такой реплики")
+        lines[index]["speaker"] = speaker
+        lines[index]["role_source"] = "reviewer"
+        self.store.upsert_dialog(raw, row["group_id"], row.get("source") or "upload")
+        return self.dialog_view(conversation_id)
 
     # ---------- evaluation ----------
     def _chain(self, provider: str) -> list[Provider]:

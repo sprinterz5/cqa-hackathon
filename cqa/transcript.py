@@ -32,7 +32,7 @@ class Message(BaseModel):
     end_t: float | None = None     # ASR segment end in seconds
     source_language: str | None = None
     translation_ru: str | None = None
-    role_source: str = "transcript"  # transcript | speaker_map | reference | context
+    role_source: str = "transcript"  # transcript | speaker_map | reference | context | ai | reviewer
     role_needs_review: bool = False
 
 
@@ -200,7 +200,7 @@ def normalize(record: dict) -> Dialog:
     for i, (m, timestamp, offset) in enumerate(zip(raw, timestamps, offsets)):
         original_speaker = str(m.get("speaker") or "").strip()
         speaker = original_speaker.lower()
-        role_source = "transcript"
+        role_source = str(m.get("role_source") or "transcript")  # "ai" for uploaded recordings
         if speaker not in SPEAKERS:
             speaker, role_source = speaker_roles[_speaker_key(m)]
         speaker_id = m.get("speaker_id")
@@ -221,7 +221,7 @@ def normalize(record: dict) -> Dialog:
             speaker_id=speaker_id, end_t=end_t,
             source_language=m.get("source_language") or m.get("language"),
             translation_ru=m.get("translation_ru"),
-            role_source=role_source, role_needs_review=role_source == "context",
+            role_source=role_source, role_needs_review=role_source in ("context", "ai"),
         ))
     channel = str(record.get("channel") or "agent chat").strip().lower()
     start = timestamps[0] if timestamps and channel == "voice call" and "T" in timestamps[0] else None

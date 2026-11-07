@@ -34,6 +34,11 @@ class UploadBody(BaseModel):
     conversation_id: str | None = None
 
 
+class SpeakerBody(BaseModel):
+    index: int    # 0-based line of the transcript
+    speaker: str  # client | operator | bot | system
+
+
 class EvalBody(BaseModel):
     conversation_ids: list[str]
     checklist_id: str
@@ -99,7 +104,7 @@ def create_app(service: Service | None = None) -> FastAPI:
     def health():
         s = svc()
         return {"ok": True, "providers": {k: p.public() for k, p in s.providers.items()},
-                "default_samples": s.default_samples}
+                "stt": s.stt.public() if s.stt else None, "default_samples": s.default_samples}
 
     # ---------- checklists ----------
     @app.get("/api/checklists")
@@ -149,12 +154,16 @@ def create_app(service: Service | None = None) -> FastAPI:
             summary = None
             if ev:
                 view = s.evaluation_view(ev["id"])
+                flags = {c["id"] for c in view["checklist"]["criteria"] if c["type"] == "flag"}
+                gross_reasons = [c["explanation"] for c in view["criteria"]
+                                 if c["criterion_id"] in flags and c.get("final_answer") == "yes" and c.get("explanation")]
                 summary = {
                     "evaluation_id": ev["id"], "checklist_id": ev["checklist_id"],
                     "checklist_version": ev["checklist_version"], "created_at": ev["created_at"],
                     "total": (ev["score"] or {}).get("total"),
                     "final_total": (view["final_score"] or {}).get("total"),
                     "gross_violation": (view["final_score"] or ev["score"] or {}).get("gross_violation"),
+                    "gross_reason": " ".join(gross_reasons) or None,
                     "needs_review": [c["criterion_id"] for c in ev["criteria"] if c["status"] != "ok"],
                     "low_confidence": [c["criterion_id"] for c in ev["criteria"]
                                        if c["status"] == "ok" and (c.get("confidence") or 0) < 0.67],
@@ -173,9 +182,25 @@ def create_app(service: Service | None = None) -> FastAPI:
         view["history"] = s.store.evaluation_history(conversation_id)
         return view
 
+    @app.post("/api/dialogs/upload-audio")
+    async def upload_audio(request: Request, filename: str, language: str | None = None,
+                           conversation_id: str | None = None):
+        """Body: the raw audio file (no multipart, so no extra dependency). Returns a job to poll."""
+        job = svc().start_audio_job(await request.body(), filename, language, conversation_id)
+        return {"job_id": job}
+
     @app.get("/api/dialogs/{conversation_id}/audio")
     async def audio(conversation_id: str):
         return await svc().audio_source(conversation_id)
+
+    @app.get("/api/dialogs/{conversation_id}/audio/file")
+    def audio_file(conversation_id: str):
+        path, media_type = svc().audio_file(conversation_id)
+        return FileResponse(path, media_type=media_type)
+
+    @app.post("/api/dialogs/{conversation_id}/speaker")
+    def set_speaker(conversation_id: str, body: SpeakerBody):
+        return svc().set_speaker(conversation_id, body.index, body.speaker)
 
     # ---------- evaluation jobs ----------
     @app.post("/api/evaluations")

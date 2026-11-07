@@ -57,6 +57,9 @@ Import results of a CLI run into the app: `.venv/bin/python scripts/import_evals
 
 For ASR speaker IDs, roles are assigned in this order: explicit `speaker_map`, labeled `reference_transcript`, then dialogue context. Common labels (`agent`, `customer`, `ivr`, …) map directly; a line without a speaker is a system line. The original ID stays in `speaker_id`; the output role is `client`, `operator`, `bot`, or `system`. Context-based assignments have `role_source="context"` and `role_needs_review=true` (shown in the UI). This contextual baseline still needs training and validation on labeled calls.
 
+## Call recordings (speech-to-text)
+
+"Загрузить запись звонка" in the UI (or `POST /api/dialogs/upload-audio?filename=call.mp3&language=RU|KZ|EN` with the file as the body) runs: Alem STT (`STT_*` in `.env`, timestamped phrases) → the LLM assigns a role to every phrase → consecutive phrases of one speaker become one line → the usual evaluation. The file is kept in `data/audio/` and plays in the dialog card. Roles are AI guesses: the card shows a note and a role selector on every line (`POST /api/dialogs/<id>/speaker`); a changed role marks the line as reviewed. Without a language the general model detects it. The Kazakh model returns no timestamps, so phrases always come from the general model.
 ## Results for the organizers
 
 `results/dev/results.json` and `results/prod/results.json` follow the organizers' format (schema 1.0): one record per dialog, 8 criteria (`contact`, `discovery`, `identification`, `consultation`, `empathy`, `dialogue`, `closure`, `critical`), `evidence_turns` numbered from 1 over the original transcript, `final_score` from the deterministic scorer, `status: "error"` with a reason when a dialog could not be evaluated. Criterion codes come from `export_codes` in the checklist config.
