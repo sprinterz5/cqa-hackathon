@@ -10,6 +10,7 @@ from typing import Callable, Protocol
 
 from .facts import detect_lang
 from .transcript import normalize
+from .translation import available as translation_available, translate_segments
 
 ROOT = Path(__file__).resolve().parent.parent
 Progress = Callable[[str], None]
@@ -138,8 +139,9 @@ def modes() -> dict:
     language_model = (ROOT / ".asr_models" / "tiny-langid" / "model.bin").is_file()
     return {"local": {"available": (ROOT / ".asr_models" / "large-v3").is_dir()
              and (ROOT / ".diarization_models" / "speechbrain-ecapa").is_dir()
-             and kazakh and language_model,
-             "kazakh_available": kazakh, "language_model_available": language_model},
+             and kazakh and language_model and translation_available(),
+             "kazakh_available": kazakh, "language_model_available": language_model,
+             "translation_available": translation_available()},
             "cloud": {"available": False, "reason": "Ожидаются ключ и формат Alem STT"}}
 
 
@@ -193,6 +195,8 @@ def process_audio(audio: Path, mode: str = "local", language: str | None = None,
         raise ValueError("Речь в записи не обнаружена")
     report("separating")
     speaker_ids = _speaker_ids(audio, segments)
+    report("translating")
+    segments = translate_segments(segments)
     record = {"channel": "voice call", "language": language or "RU", "audio_url": None,
               "transcript": [{**segment, "speaker": speaker_ids[index]}
                              for index, segment in enumerate(segments)]}
