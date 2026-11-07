@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CQA — оценка качества диалогов</title>
+  <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+  <!--
+    Plain HTML/CSS/JS, no build step and no external dependencies, so the page can be
+    uploaded as a Dynamics 365 HTML web resource. Query parameters:
+      ?api=https://host      API base URL when the page is served from elsewhere
+      ?conversation_id=ID    open one dialog card directly (e.g. from a CRM record)
+      ?embed=1               hide the navigation (for embedding into a CRM form)
+      ?role=reviewer         start in the reviewer role
+  -->
+  <header class="topbar" id="topbar">
+    <div class="brand"><span class="logo">CQA</span><span class="brand-sub">Оценка качества диалогов</span></div>
+    <nav class="nav" id="nav">
+      <a href="#/dialogs" data-route="dialogs">Диалоги</a>
+      <a href="#/appeals" data-route="appeals">Апелляции <span class="count" id="appeal-count"></span></a>
+      <a href="#/checklists" data-route="checklists">Чек-листы</a>
+      <a href="#/quality" data-route="quality">Качество AI</a>
+    </nav>
+    <div class="role" title="Роль для демонстрации: подача апелляции и её рассмотрение — разные действия">
+      <span>Роль:</span>
+      <div class="seg" id="role-switch">
+        <button data-role="operator">Оператор</button>
+        <button data-role="reviewer">Проверяющий</button>
+      </div>
+    </div>
+  </header>
+  <main id="app" class="app"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="static/app.js"></script>
+</body>
+</html>

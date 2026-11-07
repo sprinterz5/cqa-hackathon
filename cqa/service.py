@@ -350,6 +350,9 @@ class Service:
             row = self.store.get_dialog(res["conversation_id"])
             if not row or res.get("checklist_id") != checklist.id:
                 continue
+            prev = self.store.latest_evaluation(res["conversation_id"], checklist.id)
+            if prev and prev.get("imported_from") == f.name and prev.get("elapsed_s") == res.get("elapsed_s"):
+                continue  # already imported
             samples = max((len(c["samples"]) for c in res["criteria"]), default=1)
             for c in res["criteria"]:
                 if c["status"] == "ok":

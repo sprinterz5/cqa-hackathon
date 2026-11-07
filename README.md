@@ -38,3 +38,15 @@ Datasets are saved to `data/` and are not committed (they contain personal data)
 - `cqa/store.py` — SQLite (`data/cqa.db`): checklist versions, dialogs, evaluations, per-criterion cache, appeals, decisions.
 - `cqa/service.py` — dataset fetch by `group_id`, upload (API JSON or `Клиент: …` text), evaluation jobs with a per-criterion cache (replacing one criterion re-runs only that criterion), appeals and reviewer decisions (original vs. final score), audio link extraction, quality metrics.
 - `app/main.py` — REST API under `/api`, static UI from `web/`.
+
+## UI
+
+Open http://localhost:8000 after starting the backend. Plain HTML/CSS/JS in `web/` (no build, no external dependencies) so it can be uploaded as a Dynamics 365 HTML web resource:
+
+- `?api=https://host` — API base URL when the page is served elsewhere
+- `?conversation_id=ID` — open one dialog card directly (e.g. from a CRM record)
+- `?embed=1` — hide the navigation; `?role=reviewer` — start as reviewer
+
+Screens: dialogs (fetch by `group_id`, upload, batch evaluation with progress), dialog card (transcript with ids, evidence links that scroll to the message and seek the call recording, per-criterion verdicts/points/confidence, sections, gross-violation flag), appeals (operator files, reviewer confirms or changes with a reason; original and final score are both kept), checklist editor (criteria, weights, scales, N/A rules, voice-call wording, versions, JSON), AI quality.
+
+Import results of a CLI run into the app: `.venv/bin/python scripts/import_evals.py DEV`.
