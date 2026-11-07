@@ -21,7 +21,7 @@ from .facts import extract_facts, facts_to_prompt
 from .llm import LLMClient, Provider, load_env, providers_from_env
 from .prompts import PROMPT_VERSION
 from .scoring import ScoringError, Verdict, score, validate_verdict
-from .store import Store
+from .store import Store, now
 from .stt import LANG_CODES, STTConfig, assign_roles, guess_roles, merge_segments, stt_from_env, transcribe
 from .transcript import SPEAKERS, normalize, parse_plain_text
 
@@ -239,23 +239,27 @@ class Service:
                 job["stt_s"] = round(time.monotonic() - t0, 1)
                 job["stage"] = "roles"
                 t0 = time.monotonic()
+                segs = asr["segments"]
+                if voices:
+                    segs = [{**s, "voice": v} for s, v in zip(segs, voices)]
                 if chain:
                     async with self.client_factory(chain) as client:
-                        roles, role_source, role_error = await assign_roles(client, asr["segments"], voices)
+                        segs, roles, role_source, role_error = await assign_roles(client, segs)
                 else:
-                    roles, role_source, role_error = guess_roles(asr["segments"]), "context", "LLM не настроен"
+                    roles, role_source, role_error = guess_roles(segs), "context", "LLM не настроен"
                 job["roles_s"] = round(time.monotonic() - t0, 1)
                 lang = language or asr["language"]
                 record = {
                     "conversation_id": cid, "channel": "voice call", "language": lang,
                     "audio_url": None, "audio_file": stored,
-                    "transcript": merge_segments(asr["segments"], roles, role_source, voices),
+                    "transcript": merge_segments(segs, roles, role_source),
                     "asr": {"mode": mode, "stt_model": stt_model,
                             "roles_model": chain[0].model if role_source == "ai" else None,
                             "voice_groups": len(set(voices)) if voices else None,
                             "role_source": role_source, "role_error": role_error, "language": lang,
                             "language_source": "user" if language else "detected", "file": filename,
                             "duration_s": asr["duration"], "segments": len(asr["segments"]),
+                            "split_parts": sum(1 for s in segs if s.get("split")),  # parts of phrases cut by speaker
                             "dropped_segments": asr.get("dropped", 0),
                             "stt_s": job["stt_s"], "roles_s": job["roles_s"]},
                 }
@@ -283,6 +287,8 @@ class Service:
             raise ServiceError("нет такой реплики")
         lines[index]["speaker"] = speaker
         lines[index]["role_source"] = "reviewer"
+        if isinstance(raw.get("asr"), dict):  # the card compares it with the evaluation time: "re-evaluate"
+            raw["asr"]["roles_edited_at"] = now()
         self.store.upsert_dialog(raw, row["group_id"], row.get("source") or "upload")
         return self.dialog_view(conversation_id)
 

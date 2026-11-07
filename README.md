@@ -14,6 +14,8 @@ cp .env.example .env   # put the organizers' API URL (without group_id) into DAT
 
 Datasets are saved to `data/` and are not committed (they contain personal data).
 
+Windows (PowerShell): `python -m venv .venv`, then `.venv\Scripts\python -m pip install -r requirements.txt` (add `av` for Kazakh cloud audio), `.venv\Scripts\python -m pytest -q`, `.venv\Scripts\python -m uvicorn app.main:app --port 8000`. Set `TEAM_NAME` in `.env` before exporting results.
+
 ## Structure
 
 - `checklists/freedom_default.json` — the 8 criteria from the organizers' checklist; criteria 1, 4, 6, 7 have `voice call` wording overrides.

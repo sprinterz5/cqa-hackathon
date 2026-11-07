@@ -79,17 +79,34 @@ def test_whisper_loops_and_silence_are_dropped():
 
 def test_assign_roles_uses_llm_then_falls_back_to_phrase_cues():
     segs = parse_transcription(ALEM)["segments"]
-    roles, source, err = asyncio.run(assign_roles(RolesClient([json.dumps({"roles": ROLES})]), segs))
-    assert roles == ROLES and source == "ai" and err is None
+    out, roles, source, err = asyncio.run(assign_roles(RolesClient([json.dumps({"roles": ROLES})]), segs))
+    assert roles == ROLES and source == "ai" and err is None and out == segs
     # numbered answer with an extra item (the model miscounted): nothing shifts
     numbered = [{"n": i + 1, "role": r} for i, r in enumerate(ROLES)] + [{"n": 5, "role": "client"}]
-    roles, source, _ = asyncio.run(assign_roles(RolesClient([json.dumps({"roles": numbered})]), segs))
+    _, roles, source, _ = asyncio.run(assign_roles(RolesClient([json.dumps({"roles": numbered})]), segs))
     assert roles == ROLES and source == "ai"
     # wrong length twice -> cues: "меня зовут" / "проверю" are the operator, "не могу" the client
     bad = RolesClient([json.dumps({"roles": ["client"]})])
-    roles, source, err = asyncio.run(assign_roles(bad, segs))
+    _, roles, source, err = asyncio.run(assign_roles(bad, segs))
     assert source == "context" and "ожидалось 4" in err and len(bad.prompts) == 2
     assert roles == guess_roles(segs) == ROLES
+
+
+def test_model_may_split_a_phrase_where_two_people_speak():
+    segs = [{"start": 0.0, "end": 4.0, "text": "Да, верно. Хорошо, тогда смотрите заявку."},
+            {"start": 4.0, "end": 6.0, "text": "Спасибо."}]
+    answer = {"roles": [{"n": 1, "parts": [{"role": "client", "text": "Да, верно."},
+                                           {"role": "operator", "text": "Хорошо, тогда смотрите заявку."}]},
+                        {"n": 2, "role": "client"}]}
+    out, roles, source, _ = asyncio.run(assign_roles(RolesClient([json.dumps(answer)]), segs))
+    assert roles == ["client", "operator", "client"] and source == "ai"
+    assert [s["text"] for s in out] == ["Да, верно.", "Хорошо, тогда смотрите заявку.", "Спасибо."]
+    assert out[0]["start"] == 0.0 and 0 < out[0]["end"] < 4.0 and out[1]["end"] == 4.0 and out[1]["split"]
+    # parts that do not reproduce the phrase word for word are ignored: the phrase keeps one role
+    wrong = {"roles": [{"n": 1, "parts": [{"role": "client", "text": "Да."}, {"role": "operator", "text": "Смотрите."}]},
+                       {"n": 2, "role": "client"}]}
+    out, roles, _, _ = asyncio.run(assign_roles(RolesClient([json.dumps(wrong)]), segs))
+    assert len(out) == 2 and roles[1] == "client"
 
 
 @pytest.fixture()
@@ -141,6 +158,7 @@ def test_upload_audio_flow(audio_env, tmp_path):
     r = client.post("/api/dialogs/call-1/speaker", json={"index": 1, "speaker": "operator"})
     m = r.json()["dialog"]["messages"][1]
     assert m["speaker"] == "operator" and m["role_source"] == "reviewer" and not m["role_needs_review"]
+    assert r.json()["asr"]["roles_edited_at"]  # survives a reload: the card asks to re-evaluate
     assert client.post("/api/dialogs/call-1/speaker", json={"index": 9, "speaker": "client"}).status_code == 400
 
 

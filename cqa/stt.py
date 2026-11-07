@@ -96,7 +96,8 @@ ROLE_PROMPT = """Ты размечаешь расшифровку телефон
 - "client" — клиент: описывает проблему, отвечает на вопросы оператора, называет свои данные;
 - "bot" — автоответчик (IVR): меню, «нажмите», «ваш звонок важен».
 Соседние фразы часто принадлежат одному человеку; ответ на вопрос обычно произносит другой.
-Ответь только JSON: {"roles": [{"n": 1, "role": "operator"}, {"n": 2, "role": "client"}, ...]} — по одному элементу на каждую фразу, n — номер фразы."""
+Распознавание иногда склеивает в одну фразу слова двух людей («Да, верно. Хорошо, тогда смотрите…»). Только в таком явном случае верни для фразы вместо "role" список "parts": [{"role": "client", "text": "Да, верно."}, {"role": "operator", "text": "Хорошо, тогда смотрите…"}] — тексты частей подряд должны дать исходную фразу слово в слово. Без явной причины фразу не дели.
+Ответь только JSON: {"roles": [{"n": 1, "role": "operator"}, {"n": 2, "parts": [...]}, ...]} — по одному элементу на каждую фразу, n — номер фразы."""
 
 _CUES = {
     "operator": re.compile(r"меня зовут|чем могу помочь|могу ещё|могу еще|провер|идентифицир|my name is|how (can|may) i help|менің атым|көмектес"),
@@ -105,14 +106,34 @@ _CUES = {
 }
 
 
-def _parse_roles(content: str, n: int) -> list[str]:
+def _words(text: str) -> list[str]:
+    return re.findall(r"\w+", text.casefold().replace("ё", "е"))
+
+
+def _parts(x: dict, text: str) -> list[tuple[str, str]] | None:
+    """Accept a split only if the parts reproduce the phrase word for word and have valid roles."""
+    parts = x.get("parts")
+    if not isinstance(parts, list) or len(parts) < 2:
+        return None
+    out = [(str(p.get("role") or "").strip().lower(), str(p.get("text") or "").strip())
+           for p in parts if isinstance(p, dict)]
+    if len(out) != len(parts) or any(r not in ROLES or not t for r, t in out):
+        return None
+    if [w for _, t in out for w in _words(t)] != _words(text) or len({r for r, _ in out}) < 2:
+        return None
+    return out
+
+
+def _parse_roles(content: str, n: int, texts: list[str] | None = None) -> tuple[list[str], dict[int, list]]:
     """Roles by phrase number, so an extra or missing item does not shift the rest.
-    A few gaps take the previous phrase's role; many gaps mean the answer is unusable."""
+    A few gaps take the previous phrase's role; many gaps mean the answer is unusable.
+    -> (role per phrase, {phrase index: [(role, text), ...]} for phrases the model split)."""
     m = re.search(r"\{.*\}", content, re.S)
     items = json.loads(m.group(0) if m else content).get("roles")
     if not isinstance(items, list):
         raise ValueError(f"нет списка roles: {content[:200]!r}")
     by_n: dict[int, str] = {}
+    splits: dict[int, list] = {}
     if all(isinstance(x, str) for x in items):  # plain list: only trustworthy when the length matches
         if len(items) != n:
             raise ValueError(f"ожидалось {n} ролей, получено {len(items)}")
@@ -120,16 +141,41 @@ def _parse_roles(content: str, n: int) -> list[str]:
     else:
         for x in items:
             try:
-                by_n.setdefault(int(x.get("n")), x.get("role"))
+                k = int(x.get("n"))
             except (AttributeError, TypeError, ValueError):
                 continue
+            parts = _parts(x, texts[k - 1]) if texts and 1 <= k <= n else None
+            if parts:
+                splits.setdefault(k - 1, parts)
+            # an inexact split keeps the phrase whole with the role of its longest part
+            given = [p for p in x.get("parts") or [] if isinstance(p, dict) and p.get("role")]
+            role = x.get("role") or (max(given, key=lambda p: len(str(p.get("text") or "")))["role"] if given else None)
+            by_n.setdefault(k, role)
     by_n = {k: str(v).strip().lower() for k, v in by_n.items() if 1 <= k <= n and str(v).strip().lower() in ROLES}
     if len(by_n) < n * 0.9:
         raise ValueError(f"роли есть только у {len(by_n)} из {n} фраз")
     roles: list[str] = []
     for i in range(1, n + 1):
         roles.append(by_n.get(i) or (roles[-1] if roles else next(iter(by_n.values()))))
-    return roles
+    return roles, splits
+
+
+def apply_splits(segments: list[dict], roles: list[str], splits: dict[int, list]) -> tuple[list[dict], list[str]]:
+    """Replace split phrases by their parts; part times are proportional to text length."""
+    segs, out_roles = [], []
+    for i, (s, role) in enumerate(zip(segments, roles)):
+        if i not in splits:
+            segs.append(s)
+            out_roles.append(role)
+            continue
+        total = sum(len(t) for _, t in splits[i]) or 1
+        t, span = s["start"], s["end"] - s["start"]
+        for r, text in splits[i]:
+            end = round(t + span * len(text) / total, 2)
+            segs.append({**s, "start": round(t, 2), "end": end, "text": text, "split": True})
+            out_roles.append(r)
+            t = end
+    return segs, out_roles
 
 
 def guess_roles(segments: list[dict]) -> list[str]:
@@ -146,9 +192,11 @@ VOICE_HINT = """
 У каждой фразы есть метка [голос N] — группа по тембру из автоматического разделения голосов. Обычно один голос — один человек, поэтому фразы одного голоса чаще всего имеют одну роль. Но разделение ошибается (короткие фразы, перебивания, музыка): если смысл фразы явно противоречит голосу, доверяй смыслу."""
 
 
-async def assign_roles(client, segments: list[dict], voices: list[str] | None = None) -> tuple[list[str], str, str | None]:
-    """Roles per phrase: (roles, source, error). source is "ai" or "context" (fallback).
-    voices: voice group of each phrase from speaker separation (local mode), used as a hint."""
+async def assign_roles(client, segments: list[dict], split: bool = True) -> tuple[list[dict], list[str], str, str | None]:
+    """-> (phrases, role per phrase, source, error); source is "ai" or "context" (fallback).
+    A phrase with "voice" (voice group from speaker separation, local mode) shows it to the model as a hint.
+    With split=True the model may cut a phrase where two people speak; the parts replace it."""
+    voices = [s.get("voice") for s in segments] if all(s.get("voice") for s in segments) else None
     voice_no = {v: i + 1 for i, v in enumerate(dict.fromkeys(voices))} if voices else {}
     lines = "\n".join(f"{i + 1}. [{s['start']:.1f}–{s['end']:.1f} c]"
                       + (f" [голос {voice_no[voices[i]]}]" if voices else "") + f" {s['text']}"
@@ -158,15 +206,16 @@ async def assign_roles(client, segments: list[dict], voices: list[str] | None = 
     error = None
     for _ in range(2):
         try:
-            resp = await client.chat(messages, temperature=0.0, max_tokens=6000)
-            return _parse_roles(resp.content, len(segments)), "ai", None
+            resp = await client.chat(messages, temperature=0.0, max_tokens=8000)
+            roles, splits = _parse_roles(resp.content, len(segments), [s["text"] for s in segments])
+            segs, roles = apply_splits(segments, roles, splits if split else {})
+            return segs, roles, "ai", None
         except Exception as e:  # LLM down or malformed answer: retry once, then fall back to cues
             error = str(e)[:300]
-    return guess_roles(segments), "context", error
+    return segments, guess_roles(segments), "context", error
 
 
-def merge_segments(segments: list[dict], roles: list[str], role_source: str,
-                   voices: list[str] | None = None) -> list[dict]:
+def merge_segments(segments: list[dict], roles: list[str], role_source: str) -> list[dict]:
     """Consecutive phrases of one speaker (and one language) become one transcript line in the organizers'
     format. Language, Russian translation and voice group of local recognition are kept."""
     out: list[dict] = []
@@ -185,7 +234,7 @@ def merge_segments(segments: list[dict], roles: list[str], role_source: str,
             line["source_language"] = lang
         if s.get("translation_ru"):
             line["translation_ru"] = s["translation_ru"]
-        if voices:
-            line["speaker_id"] = voices[i]
+        if s.get("voice"):
+            line["speaker_id"] = s["voice"]
         out.append(line)
     return out

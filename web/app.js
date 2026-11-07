@@ -511,7 +511,8 @@
     // --- transcript ---
     // roles of uploaded recordings are AI guesses: the reviewer can fix them line by line
     const asr = data.asr;
-    let rolesChanged = false;
+    // roles fixed after the last evaluation (kept across reloads): the scores used the old roles
+    let rolesChanged = !!(asr && asr.roles_edited_at && ev && asr.roles_edited_at > ev.created_at);
     const toReview = () => d.messages.filter((m) => m.role_needs_review).length;
     function roleControl(m, el) {
       const sel = h("select", { class: "role-select", title: "Поменять говорящего",
