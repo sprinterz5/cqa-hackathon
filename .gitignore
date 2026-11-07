@@ -9,3 +9,7 @@ __pycache__/
 # misc
 .DS_Store
 *.db
+# editor swap files
+*.kate-swp
+*.swp
+*~
