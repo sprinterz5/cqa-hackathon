@@ -59,7 +59,19 @@ For ASR speaker IDs, roles are assigned in this order: explicit `speaker_map`, l
 
 ## Call recordings (speech-to-text)
 
-"Загрузить запись звонка" in the UI (or `POST /api/dialogs/upload-audio?filename=call.mp3&language=RU|KZ|EN` with the file as the body) runs: Alem STT (`STT_*` in `.env`, timestamped phrases) → the LLM assigns a role to every phrase → consecutive phrases of one speaker become one line → the usual evaluation. The file is kept in `data/audio/` and plays in the dialog card. Roles are AI guesses: the card shows a note and a role selector on every line (`POST /api/dialogs/<id>/speaker`); a changed role marks the line as reviewed. Without a language the general model detects it. The Kazakh model returns no timestamps, so phrases always come from the general model.
+"Загрузить запись звонка" in the UI, or `POST /api/dialogs/upload-audio?filename=call.mp3&mode=cloud|local&language=RU|KZ|EN&approved_external_api=true` with the file as the body. The job is polled at `/api/jobs/<id>`; the file is kept in `data/audio/` and plays in the dialog card.
+
+- `mode=cloud` (default; needs `STT_*` in `.env` and the user's consent, the recording goes to Alem): RU/EN/auto — the whole file to `speech-to-text` with phrase timestamps; KZ — pause chunks (PyAV, `pip install av`) to `speech-to-text-kk`, because the Kazakh model returns no timestamps. Whisper loops and silence are dropped.
+- `mode=local` (the recording stays on this machine; the text still goes to the LLM chosen for roles and evaluation, as for chats): Whisper large-v3 + SpeechBrain ECAPA voice groups + KZ/EN→RU translation, see below.
+- In both modes the LLM assigns a role to every phrase (in local mode it also sees the voice group); consecutive phrases of one speaker become one line. Roles are AI guesses: the card shows a note and a role selector on every line (`POST /api/dialogs/<id>/speaker`).
+- Quality on the five DEV calls: `scripts/asr_check.py` (cloud) and `scripts/eval_hybrid_roles.py` (local), the same role metric; results in `notes/experiments.md` (E26, E30–E32), choices in `notes/decisions.md`.
+
+### Local mode setup
+
+Local mode (Python 3.12): `python scripts/install_audio.py` installs `requirements-audio.txt` and downloads six public models without an account. Downloads total about 6.8 GB: [Whisper large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) 3.09 GB, [Kazakh Whisper Turbo CT2](https://huggingface.co/globalizator/gzwhisper-kazakh-ct2-int8) 0.83 GB, [Whisper tiny](https://huggingface.co/Systran/faster-whisper-tiny) 0.08 GB, [SpeechBrain ECAPA](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb) 0.09 GB, [KazRush kk-ru](https://huggingface.co/deepvk/kazRush-kk-ru) 0.79 GB, and [M2M100 418M](https://huggingface.co/facebook/m2m100_418M) 1.94 GB. Allow additional space for Python packages. On this CPU, a 30-second DEV sample took 93 seconds end to end (about 186 seconds per audio minute); full-call speed has not been measured.
+
+Cloud mode needs `pip install av` (about 86 MB installed locally), `STT_API_KEY` and, for Kazakh, `STT_KZ_API_KEY`. PyAV decodes MP3 and a small energy-based splitter finds pauses. Cloud mode does not load Whisper, SpeechBrain or local translation models. Silence chunks are not speaker identities: inferred roles require review, and `translation_ru` is not produced. Uploading audio to Alem requires explicit permission in the UI.
+
 ## Results for the organizers
 
 `results/dev/results.json` and `results/prod/results.json` follow the organizers' format (schema 1.0): one record per dialog, 8 criteria (`contact`, `discovery`, `identification`, `consultation`, `empathy`, `dialogue`, `closure`, `critical`), `evidence_turns` numbered from 1 over the original transcript, `final_score` from the deterministic scorer, `status: "error"` with a reason when a dialog could not be evaluated. Criterion codes come from `export_codes` in the checklist config.

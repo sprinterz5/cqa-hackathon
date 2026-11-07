@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS appeals (
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, appeal_id INTEGER NOT NULL, decision TEXT NOT NULL,
   answer TEXT, value REAL, reason TEXT NOT NULL, reviewer TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS call_standard (
+  conversation_id TEXT PRIMARY KEY, result TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
 
@@ -101,6 +103,7 @@ class Store:
                    source=excluded.source""",
                 (record["conversation_id"], group_id, record.get("channel"), record.get("language"),
                  json.dumps(record, ensure_ascii=False), source, now()))
+        self._q("DELETE FROM call_standard WHERE conversation_id = ?", (record["conversation_id"],))
 
     def get_dialog(self, conversation_id: str) -> dict | None:
         rows = self._q("SELECT * FROM dialogs WHERE conversation_id = ?", (conversation_id,))
@@ -109,6 +112,17 @@ class Store:
         r = dict(rows[0])
         r["raw"] = json.loads(r["raw"])
         return r
+
+    def save_call_standard(self, conversation_id: str, result: dict) -> None:
+        self._q("""INSERT INTO call_standard VALUES (?, ?, ?)
+                   ON CONFLICT(conversation_id) DO UPDATE SET result=excluded.result,
+                   created_at=excluded.created_at""",
+                (conversation_id, json.dumps(result, ensure_ascii=False), now()))
+
+    def get_call_standard(self, conversation_id: str) -> dict | None:
+        rows = self._q("SELECT result, created_at FROM call_standard WHERE conversation_id = ?",
+                       (conversation_id,))
+        return {**json.loads(rows[0]["result"]), "created_at": rows[0]["created_at"]} if rows else None
 
     def list_dialogs(self, group_id: str | None = None) -> list[dict]:
         if group_id:

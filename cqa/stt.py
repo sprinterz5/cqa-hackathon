@@ -142,10 +142,18 @@ def guess_roles(segments: list[dict]) -> list[str]:
     return roles
 
 
-async def assign_roles(client, segments: list[dict]) -> tuple[list[str], str, str | None]:
-    """Roles per phrase: (roles, source, error). source is "ai" or "context" (fallback)."""
-    lines = "\n".join(f"{i + 1}. [{s['start']:.1f}–{s['end']:.1f} c] {s['text']}" for i, s in enumerate(segments))
-    messages = [{"role": "system", "content": ROLE_PROMPT},
+VOICE_HINT = """
+У каждой фразы есть метка [голос N] — группа по тембру из автоматического разделения голосов. Обычно один голос — один человек, поэтому фразы одного голоса чаще всего имеют одну роль. Но разделение ошибается (короткие фразы, перебивания, музыка): если смысл фразы явно противоречит голосу, доверяй смыслу."""
+
+
+async def assign_roles(client, segments: list[dict], voices: list[str] | None = None) -> tuple[list[str], str, str | None]:
+    """Roles per phrase: (roles, source, error). source is "ai" or "context" (fallback).
+    voices: voice group of each phrase from speaker separation (local mode), used as a hint."""
+    voice_no = {v: i + 1 for i, v in enumerate(dict.fromkeys(voices))} if voices else {}
+    lines = "\n".join(f"{i + 1}. [{s['start']:.1f}–{s['end']:.1f} c]"
+                      + (f" [голос {voice_no[voices[i]]}]" if voices else "") + f" {s['text']}"
+                      for i, s in enumerate(segments))
+    messages = [{"role": "system", "content": ROLE_PROMPT + (VOICE_HINT if voices else "")},
                 {"role": "user", "content": f"Фраз: {len(segments)}\n\n{lines}"}]
     error = None
     for _ in range(2):
@@ -157,15 +165,27 @@ async def assign_roles(client, segments: list[dict]) -> tuple[list[str], str, st
     return guess_roles(segments), "context", error
 
 
-def merge_segments(segments: list[dict], roles: list[str], role_source: str) -> list[dict]:
-    """Consecutive phrases of one speaker become one transcript line in the organizers' format."""
+def merge_segments(segments: list[dict], roles: list[str], role_source: str,
+                   voices: list[str] | None = None) -> list[dict]:
+    """Consecutive phrases of one speaker (and one language) become one transcript line in the organizers'
+    format. Language, Russian translation and voice group of local recognition are kept."""
     out: list[dict] = []
-    for s, role in zip(segments, roles):
-        if out and out[-1]["speaker"] == role:
+    for i, (s, role) in enumerate(zip(segments, roles)):
+        lang = s.get("source_language")
+        if out and out[-1]["speaker"] == role and out[-1].get("source_language") == lang:
             out[-1]["text"] += " " + s["text"]
             out[-1]["end"] = s["end"]
+            if s.get("translation_ru"):
+                out[-1]["translation_ru"] = " ".join(filter(None, [out[-1].get("translation_ru"), s["translation_ru"]]))
             continue
         mm, ss = divmod(int(s["start"]), 60)
-        out.append({"timestamp": f"{mm:02d}:{ss:02d}", "start": s["start"], "end": s["end"],
-                    "speaker": role, "text": s["text"], "role_source": role_source})
+        line = {"timestamp": f"{mm:02d}:{ss:02d}", "start": s["start"], "end": s["end"],
+                "speaker": role, "text": s["text"], "role_source": role_source}
+        if lang:
+            line["source_language"] = lang
+        if s.get("translation_ru"):
+            line["translation_ru"] = s["translation_ru"]
+        if voices:
+            line["speaker_id"] = voices[i]
+        out.append(line)
     return out

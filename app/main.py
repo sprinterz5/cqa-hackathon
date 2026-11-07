@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,11 +16,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from cqa.audio_pipeline import modes as stt_modes
+from cqa.call_standard import analyze_call
 from cqa.service import Service, ServiceError
 from cqa.store import Store
+from cqa.transcript import normalize
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
+UPLOADS = ROOT / "data" / "uploads"  # recordings uploaded by the earlier local-only flow (audio_url "local:<id>")
+SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 class FetchBody(BaseModel):
@@ -46,6 +52,11 @@ class EvalBody(BaseModel):
     samples: int | None = None
     provider: str = "primary"
     force: bool = False
+
+
+class CallStandardBody(BaseModel):
+    provider: str = "primary"
+    approved_external_api: bool = False
 
 
 class AppealBody(BaseModel):
@@ -104,7 +115,8 @@ def create_app(service: Service | None = None) -> FastAPI:
     def health():
         s = svc()
         return {"ok": True, "providers": {k: p.public() for k, p in s.providers.items()},
-                "stt": s.stt.public() if s.stt else None, "default_samples": s.default_samples}
+                "stt": s.stt.public() if s.stt else None, "stt_modes": stt_modes(),
+                "default_samples": s.default_samples}
 
     # ---------- checklists ----------
     @app.get("/api/checklists")
@@ -139,6 +151,17 @@ def create_app(service: Service | None = None) -> FastAPI:
     def upload(body: UploadBody):
         ids = svc().upload(body.content, body.group_id, body.channel, body.language, body.conversation_id)
         return {"conversation_ids": ids}
+
+    @app.post("/api/dialogs/upload-audio")
+    async def upload_audio(request: Request, filename: str = "upload.mp3", mode: str = "cloud", language: str | None = None,
+                           conversation_id: str | None = None, approved_external_api: bool = False):
+        """Body: the raw audio file (no multipart, so no extra dependency). Returns a job to poll at /api/jobs.
+        mode=cloud sends the recording to Alem STT and needs the user's consent; mode=local runs on this machine."""
+        if mode == "cloud" and not approved_external_api:
+            raise HTTPException(403, "Нужно разрешение на передачу записи в Alem STT")
+        job = svc().start_audio_job(await request.body(), filename, None if language == "AUTO" else language,
+                                    conversation_id, mode=mode)
+        return {"job_id": job}
 
     @app.get("/api/groups")
     def groups():
@@ -182,15 +205,41 @@ def create_app(service: Service | None = None) -> FastAPI:
         view["history"] = s.store.evaluation_history(conversation_id)
         return view
 
-    @app.post("/api/dialogs/upload-audio")
-    async def upload_audio(request: Request, filename: str, language: str | None = None,
-                           conversation_id: str | None = None):
-        """Body: the raw audio file (no multipart, so no extra dependency). Returns a job to poll."""
-        job = svc().start_audio_job(await request.body(), filename, language, conversation_id)
-        return {"job_id": job}
+    @app.get("/api/dialogs/{conversation_id}/call-standard")
+    def get_call_standard(conversation_id: str):
+        row = svc().store.get_dialog(conversation_id)
+        if not row:
+            raise HTTPException(404, "Диалог не найден")
+        return {"result": svc().store.get_call_standard(conversation_id)}
+
+    @app.post("/api/dialogs/{conversation_id}/call-standard")
+    async def run_call_standard(conversation_id: str, body: CallStandardBody):
+        s = svc()
+        row = s.store.get_dialog(conversation_id)
+        if not row:
+            raise HTTPException(404, "Диалог не найден")
+        dialog = normalize(row["raw"])
+        if not dialog.is_call:
+            raise HTTPException(400, "Стандарт применим только к звонкам")
+        if body.provider not in ("primary", "local"):
+            raise HTTPException(400, "Неизвестный провайдер")
+        if body.provider != "local" and not body.approved_external_api:
+            raise HTTPException(403, "Нужно разрешение на передачу транскрипта внешнему API")
+        chain = s._chain(body.provider)
+        async with s.client_factory(chain) as client:
+            try:
+                result = await analyze_call(dialog, client)
+            except ValueError as exc:
+                raise ServiceError(str(exc)) from exc
+        s.store.save_call_standard(conversation_id, result)
+        return {"result": s.store.get_call_standard(conversation_id)}
 
     @app.get("/api/dialogs/{conversation_id}/audio")
-    async def audio(conversation_id: str):
+    async def audio(conversation_id: str, request: Request):
+        row = svc().store.get_dialog(conversation_id)
+        if row and row["raw"].get("audio_url") == f"local:{conversation_id}":
+            url = str(request.url_for("uploaded_audio_file", conversation_id=conversation_id))
+            return {"src": url, "page": url}
         return await svc().audio_source(conversation_id)
 
     @app.get("/api/dialogs/{conversation_id}/audio/file")
@@ -201,6 +250,16 @@ def create_app(service: Service | None = None) -> FastAPI:
     @app.post("/api/dialogs/{conversation_id}/speaker")
     def set_speaker(conversation_id: str, body: SpeakerBody):
         return svc().set_speaker(conversation_id, body.index, body.speaker)
+
+    @app.get("/api/dialogs/{conversation_id}/audio-file", name="uploaded_audio_file")
+    def uploaded_audio_file(conversation_id: str):
+        if not SAFE_ID.fullmatch(conversation_id):
+            raise HTTPException(404, "Запись не найдена")
+        row = svc().store.get_dialog(conversation_id)
+        file = UPLOADS / f"{conversation_id}.mp3"
+        if not row or row["raw"].get("audio_url") != f"local:{conversation_id}" or not file.is_file():
+            raise HTTPException(404, "Запись не найдена")
+        return FileResponse(file, media_type="audio/mpeg")
 
     # ---------- evaluation jobs ----------
     @app.post("/api/evaluations")

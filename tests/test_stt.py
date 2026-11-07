@@ -121,7 +121,7 @@ def wait(client, job_id):
 def test_upload_audio_flow(audio_env, tmp_path):
     client, svc, seen = audio_env
     assert client.get("/api/health").json()["stt"]["model"] == "speech-to-text"
-    r = client.post("/api/dialogs/upload-audio", params={"filename": "call 1.mp3", "conversation_id": "call-1"},
+    r = client.post("/api/dialogs/upload-audio", params={"filename": "call 1.mp3", "conversation_id": "call-1", "approved_external_api": "true"},
                     content=b"ID3fake-mp3")
     assert r.status_code == 200, r.text
     job = wait(client, r.json()["job_id"])
@@ -146,10 +146,10 @@ def test_upload_audio_flow(audio_env, tmp_path):
 
 def test_upload_audio_rejects_bad_input(audio_env):
     client, svc, _ = audio_env
-    r = client.post("/api/dialogs/upload-audio", params={"filename": "notes.txt"}, content=b"x")
+    r = client.post("/api/dialogs/upload-audio", params={"filename": "notes.txt", "approved_external_api": "true"}, content=b"x")
     assert r.status_code == 400 and "формат" in r.json()["detail"]
-    r = client.post("/api/dialogs/upload-audio", params={"filename": "a.wav", "language": "DE"}, content=b"x")
+    r = client.post("/api/dialogs/upload-audio", params={"filename": "a.wav", "language": "DE", "approved_external_api": "true"}, content=b"x")
     assert r.status_code == 400 and "язык" in r.json()["detail"]
     svc.stt = None
-    r = client.post("/api/dialogs/upload-audio", params={"filename": "a.wav"}, content=b"x")
+    r = client.post("/api/dialogs/upload-audio", params={"filename": "a.wav", "approved_external_api": "true"}, content=b"x")
     assert r.status_code == 400 and "STT_API_KEY" in r.json()["detail"]

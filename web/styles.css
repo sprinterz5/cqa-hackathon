@@ -119,6 +119,9 @@ label.check { display: inline-flex; gap: 6px; align-items: center; cursor: point
 .msg .meta .mid { font-weight: 700; color: #39433e; display: block; }
 .msg .who { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px; }
 .msg .text { white-space: pre-wrap; word-wrap: break-word; line-height: 1.45; }
+.translation-toggle { display: flex; gap: 6px; margin: 8px 0 12px; }
+.translation-ru { margin-top: 5px; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: pre-wrap; }
+.translation-ru[hidden] { display: none; }
 .msg.client .who { color: #1d5fbf; }
 .msg.operator { background: #f3faf6; }
 .msg.operator .who { color: var(--yes); }

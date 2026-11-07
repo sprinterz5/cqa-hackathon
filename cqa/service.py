@@ -22,7 +22,7 @@ from .llm import LLMClient, Provider, load_env, providers_from_env
 from .prompts import PROMPT_VERSION
 from .scoring import ScoringError, Verdict, score, validate_verdict
 from .store import Store
-from .stt import LANG_CODES, STTConfig, assign_roles, merge_segments, stt_from_env, transcribe
+from .stt import LANG_CODES, STTConfig, assign_roles, guess_roles, merge_segments, stt_from_env, transcribe
 from .transcript import SPEAKERS, normalize, parse_plain_text
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +59,7 @@ class Service:
         self.stt = stt if stt is not None or providers is not None else stt_from_env()
         self.transcriber = transcriber or transcribe
         self.audio_dir = audio_dir or ROOT / "data" / "audio"
+        self._local_audio_lock = asyncio.Lock()
         self.jobs: dict[str, dict] = {}
 
     # ---------- checklists ----------
@@ -161,9 +162,19 @@ class Service:
 
     # ---------- uploaded call recordings: audio -> STT -> roles -> dialog ----------
     def start_audio_job(self, data: bytes, filename: str, language: str | None = None,
-                        conversation_id: str | None = None, group_id: str = "UPLOAD") -> str:
-        if not self.stt:
+                        conversation_id: str | None = None, group_id: str = "UPLOAD", mode: str = "cloud",
+                        replace: bool = False) -> str:
+        """cloud: Alem STT (RU/EN: whole file with phrase timestamps; KZ: pause chunks to the Kazakh model).
+        local: Whisper + voice groups + translation on this machine (cqa/audio_pipeline.py).
+        Roles are always assigned by the LLM; in local mode it also sees the voice group of each phrase."""
+        if mode not in ("cloud", "local"):
+            raise ServiceError("режим: cloud или local")
+        if mode == "cloud" and not self.stt:
             raise ServiceError("распознавание речи не настроено (STT_API_KEY в .env)")
+        if mode == "local":
+            from .audio_pipeline import modes
+            if not modes()["local"]["available"]:
+                raise ServiceError("локальный режим не установлен: см. requirements-audio.txt и scripts/install_audio.py")
         ext = Path(filename or "").suffix.lower()
         if ext not in AUDIO_TYPES:
             raise ServiceError(f"формат не поддерживается: {ext or 'без расширения'}; нужен "
@@ -178,12 +189,43 @@ class Service:
         cid = (conversation_id or "").strip() or f"call-{uuid.uuid4().hex[:6]}"
         if not re.fullmatch(r"[\w.\-]{1,80}", cid):
             raise ServiceError("ID диалога: буквы, цифры, «-», «_», «.»")
-        chain = self._chain("primary")
+        if not replace and self.store.get_dialog(cid):
+            raise ServiceError(f"диалог {cid} уже есть — задайте другой ID")
+        # roles: the cloud LLM, else the local one; without any LLM phrase cues are used (marked for review)
+        chain = next(([self.providers[p]] + ([self.providers["fallback"]] if p == "primary" and "fallback" in self.providers else [])
+                      for p in ("primary", "local") if p in self.providers), [])
         job_id = uuid.uuid4().hex[:10]
-        job = {"id": job_id, "kind": "audio", "status": "running", "stage": "stt", "conversation_id": cid,
-               "file": filename, "bytes": len(data), "started_at": time.time(), "finished_at": None,
-               "total": 1, "done": 0, "failed": [], "results": {}}
+        job = {"id": job_id, "kind": "audio", "mode": mode, "status": "running", "stage": "stt", "detail": None,
+               "conversation_id": cid, "file": filename, "bytes": len(data), "started_at": time.time(),
+               "finished_at": None, "total": 1, "done": 0, "failed": [], "results": {}}
         self.jobs[job_id] = job
+        loop = asyncio.get_running_loop()
+
+        async def recognize(path: Path) -> tuple[dict, list[str] | None, str]:
+            """-> ({"segments", "language", "duration"}, voice group per phrase or None, STT model name)."""
+            if mode == "local":
+                from .audio_pipeline import process_audio
+
+                def progress(stage: str):
+                    loop.call_soon_threadsafe(job.update, {"detail": stage})
+                async with self._local_audio_lock:  # CPU-heavy models: one recording at a time
+                    rec = await asyncio.to_thread(process_audio, path, "local", language, progress)
+                segs = [{k: s.get(k) for k in ("start", "end", "text", "source_language", "translation_ru")}
+                        for s in rec["transcript"]]
+                langs = [s["source_language"] for s in segs if s.get("source_language")]
+                lang = language or (max(set(langs), key=langs.count) if langs else None)
+                return ({"segments": segs, "language": lang, "duration": segs[-1]["end"] if segs else 0},
+                        [s["speaker"] for s in rec["transcript"]], "local whisper large-v3 + ECAPA")
+            if language == "KZ":
+                from . import silence_audio
+                if silence_audio.available():  # the Kazakh model has no phrase timestamps: cut by pauses first
+                    from .audio_pipeline import AlemSTT
+                    segs = await asyncio.to_thread(AlemSTT().transcribe, path, "KZ")
+                    segs = [{"start": s["start"], "end": s["end"], "text": s["text"], "source_language": "KZ"}
+                            for s in segs]
+                    return ({"segments": segs, "language": "KZ", "duration": segs[-1]["end"] if segs else 0},
+                            None, "speech-to-text-kk")
+            return await self.transcriber(self.stt, data, filename, language), None, self.stt.model
 
         async def run():
             try:
@@ -191,24 +233,30 @@ class Service:
                 stored = f"{cid}{ext}"
                 (self.audio_dir / stored).write_bytes(data)
                 t0 = time.monotonic()
-                asr = await self.transcriber(self.stt, data, filename, language)
+                asr, voices, stt_model = await recognize(self.audio_dir / stored)
                 if not asr["segments"]:
                     raise ServiceError("в записи не распознано ни одной фразы")
                 job["stt_s"] = round(time.monotonic() - t0, 1)
                 job["stage"] = "roles"
                 t0 = time.monotonic()
-                async with self.client_factory(chain) as client:
-                    roles, role_source, role_error = await assign_roles(client, asr["segments"])
+                if chain:
+                    async with self.client_factory(chain) as client:
+                        roles, role_source, role_error = await assign_roles(client, asr["segments"], voices)
+                else:
+                    roles, role_source, role_error = guess_roles(asr["segments"]), "context", "LLM не настроен"
                 job["roles_s"] = round(time.monotonic() - t0, 1)
                 lang = language or asr["language"]
                 record = {
                     "conversation_id": cid, "channel": "voice call", "language": lang,
                     "audio_url": None, "audio_file": stored,
-                    "transcript": merge_segments(asr["segments"], roles, role_source),
-                    "asr": {"stt_model": self.stt.model, "roles_model": chain[0].model if role_source == "ai" else None,
+                    "transcript": merge_segments(asr["segments"], roles, role_source, voices),
+                    "asr": {"mode": mode, "stt_model": stt_model,
+                            "roles_model": chain[0].model if role_source == "ai" else None,
+                            "voice_groups": len(set(voices)) if voices else None,
                             "role_source": role_source, "role_error": role_error, "language": lang,
                             "language_source": "user" if language else "detected", "file": filename,
                             "duration_s": asr["duration"], "segments": len(asr["segments"]),
+                            "dropped_segments": asr.get("dropped", 0),
                             "stt_s": job["stt_s"], "roles_s": job["roles_s"]},
                 }
                 self.store.upsert_dialog(record, group_id, "audio")

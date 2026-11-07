@@ -130,7 +130,7 @@ async def main() -> None:
         async with httpx.AsyncClient(timeout=300, follow_redirects=True) as http:
             mp3 = (await http.get(src["src"])).content
         job_id = svc.start_audio_job(mp3, f"{cid}.mp3", language=None, conversation_id=f"{cid}-asr",
-                                     group_id="ASRCHECK")
+                                     group_id="ASRCHECK", replace=True)
         job = svc.jobs[job_id]
         await job["task"]
         if job["status"] != "done":

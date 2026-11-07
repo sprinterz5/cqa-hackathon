@@ -1,0 +1,10 @@
+-r requirements.txt
+av>=16,<20
+faster-whisper==1.2.1
+speechbrain==1.1.2
+torch>=2.6,<3
+torchaudio>=2.6,<3
+scipy>=1.14
+transformers>=4.49,<6
+sentencepiece>=0.2
+huggingface-hub>=0.30

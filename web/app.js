@@ -357,8 +357,10 @@
     }
 
     function audioForm() {
-      if (state.health && !state.health.stt) {
-        return h("div", { class: "panel empty" }, "Распознавание речи не настроено: добавьте STT_API_KEY в .env и перезапустите сервер.");
+      const localOk = !!(state.health && state.health.stt_modes && state.health.stt_modes.local && state.health.stt_modes.local.available);
+      const cloudOk = !!(state.health && state.health.stt);
+      if (!cloudOk && !localOk) {
+        return h("div", { class: "panel empty" }, "Распознавание речи не настроено: добавьте STT_API_KEY в .env (облако) или установите локальные модели (requirements-audio.txt) и перезапустите сервер.");
       }
       let picked = null;
       const preview = h("div");
@@ -375,7 +377,7 @@
         if (!id.value.trim()) id.value = f.name.replace(/\.[^.]+$/, "").replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 60);
         preview.replaceChildren(h("div", { class: "row small" }, h("b", null, f.name), h("span", { class: "muted" }, `${(f.size / 1048576).toFixed(1)} МБ`)),
           h("audio", { controls: true, preload: "metadata", src: URL.createObjectURL(f), style: "width:100%;margin-top:6px" }));
-        go.disabled = false;
+        sync();
       }
       const id = h("input", { placeholder: "ID диалога (по имени файла)" });
       const lang = h("select", null,
@@ -385,10 +387,24 @@
       const evalNow = h("input", { type: "checkbox", checked: true });
       const steps = h("ol", { class: "steps" });
       const go = h("button", { class: "btn primary", disabled: true, onclick: start }, "Распознать");
+      // cloud: Alem STT (needs consent: the recording leaves this machine); local: Whisper + voice separation
+      const mode = h("select", { onchange: () => { renderSteps(null); sync(); } },
+        h("option", { value: "cloud", disabled: !cloudOk, selected: cloudOk }, "Облако · Alem STT" + (cloudOk ? "" : " (нет STT_API_KEY)")),
+        h("option", { value: "local", disabled: !localOk, selected: !cloudOk }, "Локально · Whisper + разделение голосов" + (localOk ? "" : " (не установлено)")));
+      const consent = h("input", { type: "checkbox", onchange: () => sync() });
+      const consentRow = h("label", { class: "check small" }, consent, "Разрешаю передать запись в Alem STT (облачный сервис) для распознавания");
+      function sync() {
+        consentRow.style.display = mode.value === "cloud" ? "" : "none";
+        go.disabled = !picked || (mode.value === "cloud" && !consent.checked);
+      }
+      const LOCAL_DETAIL = { recognizing: "распознавание", separating: "разделение голосов", translating: "перевод на русский", parsing: "разбор" };
 
-      const STEPS = [["upload", "Загрузка файла"], ["stt", "Распознавание речи · Alem " + ((state.health && state.health.stt) || {}).model],
+      const steps_ = () => [["upload", "Загрузка файла"],
+        ["stt", mode.value === "local" ? "Распознавание и разделение голосов · локально" : "Распознавание речи · Alem " + ((state.health && state.health.stt) || {}).model],
         ["roles", "Кто говорит: оператор или клиент · " + (((state.health || {}).providers || {}).primary || {}).model], ["eval", "Оценка по чек-листу"]];
       function renderSteps(current, error, extra) {
+        if (current == null) { steps.replaceChildren(); return; }
+        const STEPS = steps_();
         const order = STEPS.map((s) => s[0]).filter((s) => s !== "eval" || evalNow.checked);
         const at = order.indexOf(current);
         steps.replaceChildren(...order.map((key, i) => {
@@ -400,10 +416,11 @@
       }
 
       async function start() {
-        go.disabled = true; drop.style.pointerEvents = "none";
+        go.disabled = true; drop.style.pointerEvents = "none"; mode.disabled = true;
         renderSteps("upload");
         try {
-          const qsx = new URLSearchParams({ filename: picked.name });
+          const qsx = new URLSearchParams({ filename: picked.name, mode: mode.value });
+          if (mode.value === "cloud") qsx.set("approved_external_api", "true");
           if (lang.value) qsx.set("language", lang.value);
           if (id.value.trim()) qsx.set("conversation_id", id.value.trim());
           const { job_id } = await api("/dialogs/upload-audio?" + qsx, { method: "POST", body: picked,
@@ -413,7 +430,7 @@
             j = await api("/jobs/" + job_id);
             if (j.status !== "running") break;
             const sec = Math.round(Date.now() / 1000 - j.started_at);
-            renderSteps(j.stage, null, `${sec} с`);
+            renderSteps(j.stage, null, (j.detail && LOCAL_DETAIL[j.detail] ? LOCAL_DETAIL[j.detail] + " · " : "") + `${sec} с`);
             await new Promise((r) => setTimeout(r, 1000));
           }
           if (j.status === "error") throw Object.assign(new Error(j.error), { stage: j.stage });
@@ -431,14 +448,16 @@
           location.hash = "#/dialog/" + encodeURIComponent(cid);
         } catch (e) {
           renderSteps(e.stage || "upload", e.message);
-          go.disabled = false; go.textContent = "Попробовать ещё раз"; drop.style.pointerEvents = "";
+          go.textContent = "Попробовать ещё раз"; drop.style.pointerEvents = ""; mode.disabled = false; sync();
         }
       }
 
+      sync();
       return h("div", { class: "stack" },
         h("div", { class: "sub" }, "Запись расшифруется, система определит, где говорит оператор, а где клиент, и оценит звонок по чек-листу. Роли потом можно поправить в карточке."),
         input, drop, preview,
-        h("div", { class: "row" }, id, lang),
+        h("div", { class: "row" }, id, lang, mode),
+        consentRow,
         h("label", { class: "check" }, evalNow, `Сразу оценить по чек-листу «${cl ? cl.name : state.checklistId}»`),
         steps,
         h("div", { class: "row" }, h("span", { class: "spacer" }), h("button", { class: "btn", onclick: () => close() }, "Отмена"), go));
@@ -456,6 +475,8 @@
     const facts = data.facts;
     const ev = data.evaluation;
     const isCall = d.channel === "voice call";
+    const hasTranslation = isCall && d.messages.some((m) => m.translation_ru);
+    let showTranslation = store.get("showTranslation", false);
     const holdIds = new Set(facts.on_hold_ids || []);
     const msgEls = {};
     let audio = null;
@@ -515,15 +536,20 @@
       if (m.role_needs_review && m.role_source !== "ai") return h("span", { class: "badge b-warn", title: "Роль угадана по ключевым фразам" }, "проверьте");
       return null;
     }
+    const translationEls = [];
     const transcript = h("div", { class: "transcript" }, d.messages.map((m) => {
       const hold = holdIds.has(m.id);
+      const translation = isCall && m.translation_ru
+        ? h("div", { class: "translation-ru", hidden: !showTranslation }, m.translation_ru)
+        : null;
+      if (translation) translationEls.push(translation);
       const el = h("div", { class: `msg ${m.speaker}${hold ? " hold" : ""}`, id: "msg-" + m.id });
       el.append(
         h("div", { class: "meta" }, h("span", { class: "mid" }, m.id), fmtT(m.t),
           isCall && m.t != null ? h("div", null, h("button", { class: "play", title: "Воспроизвести с этого места", onclick: () => playAt(m) }, "▶")) : null),
         h("div", null,
           h("div", { class: "who" }, asr ? roleControl(m, el) : speakerName(m), hold ? " · на удержании (клиент не слышит)" : ""),
-          h("div", { class: "text" }, m.text)));
+          h("div", { class: "text" }, m.text), translation));
       msgEls[m.id] = el;
       return el;
     }));
@@ -536,7 +562,8 @@
       const langNote = asr.language ? `${asr.language}${asr.language_source === "detected" ? " (определён автоматически)" : ""}` : "не определён";
       asrNote.replaceChildren(h("div", { class: "asr-note" + (guessed && n || rolesChanged ? " warn" : "") },
         h("div", null, h("b", null, "Расшифровано автоматически. "),
-          `Речь: Alem ${asr.stt_model}; кто говорит: ${guessed ? "угадано по ключевым фразам (модель не ответила)" : asr.roles_model}. `,
+          `Речь: ${asr.mode === "local" ? asr.stt_model : "Alem " + asr.stt_model}` + (asr.voice_groups ? `, голосов: ${asr.voice_groups}` : "")
+            + `; кто говорит: ${guessed ? "угадано по ключевым фразам (модель не ответила)" : asr.roles_model}. `,
           `Язык ${langNote} · ${fmtT(asr.duration_s)} записи · ${fmt(asr.stt_s + asr.roles_s, 1)} с на обработку.`),
         n ? h("div", { style: "margin-top:4px" }, guessed
           ? `Проверьте отмеченные роли (${n}): если подпись неверна, выберите правильную в списке у реплики.`
@@ -545,6 +572,22 @@
           h("span", null, "Роли изменены после оценки: баллы считались по старым ролям."), h("span", { class: "spacer" }),
           h("button", { class: "btn sm primary", onclick: () => { rolesChanged = false; renderAsrNote(); reevaluate(); } }, "Оценить заново")) : null));
     }
+    const originalBtn = h("button", { class: "btn", onclick: () => toggleTranslation(false) }, "Оригинал");
+    const translationBtn = h("button", { class: "btn", onclick: () => toggleTranslation(true) }, "Перевод");
+    function toggleTranslation(value) {
+      showTranslation = value;
+      store.set("showTranslation", value);
+      for (const el of translationEls) el.hidden = !value;
+      originalBtn.className = value ? "btn" : "btn primary";
+      translationBtn.className = value ? "btn primary" : "btn";
+      originalBtn.setAttribute("aria-pressed", String(!value));
+      translationBtn.setAttribute("aria-pressed", String(value));
+    }
+    toggleTranslation(showTranslation);
+    const translationSwitch = hasTranslation
+      ? h("div", { class: "translation-toggle", role: "group", "aria-label": "Отображение перевода" },
+        originalBtn, translationBtn)
+      : null;
     function fmtT(t) {
       if (t == null) return "";
       t = Math.round(t);
@@ -583,10 +626,64 @@
 
     // --- evaluation panel ---
     const right = h("div", { class: "stack" });
+    const standardPanel = isCall ? h("div", { class: "panel" }) : null;
+    let standardResult = null;
+    let standardBusy = false;
+    function standardEvidence(ids) {
+      return (ids || []).map((id) => h("button", { class: "chip", onclick: () => jump(id, id, true) }, id));
+    }
+    function renderStandard(result, busy) {
+      if (!standardPanel) return;
+      standardResult = result;
+      standardBusy = busy;
+      standardPanel.replaceChildren(
+        h("div", { class: "row" }, h("h2", null, "Стандарт звонка"), h("span", { class: "spacer" }),
+          h("button", { class: "btn sm", disabled: busy, onclick: runStandard },
+            busy ? "Анализируется…" : result ? "Пересчитать" : "Анализировать")),
+        h("div", { class: "small muted" }, "Дополнительная аналитика; не влияет на оценку по чек-листу."),
+        busy ? h("div", { class: "small muted", style: "margin-top:10px" }, "Задача: анализ звонка моделью…") : null,
+        result ? h("div", { class: "stack", style: "margin-top:12px" },
+          h("div", { class: "scorebox" }, h("div", null, h("div", { class: "small muted" }, "Call Health Score"),
+            h("div", { class: "big" }, result.score == null ? "—" : fmt(result.score), h("small", null, " / 100"))),
+            h("span", { class: "badge " + (result.gross_violation.found ? "b-gross" : "b-score") }, result.status)),
+          result.preliminary ? h("div", { class: "small muted" }, "Балл предварительный: не хватает подтверждённых данных.") : null,
+          result.gross_violation.found ? h("div", { class: "decision" },
+            h("b", null, "Грубое нарушение: "), result.gross_violation.explanation,
+            h("div", { class: "chips" }, standardEvidence(result.gross_violation.evidence))) : null,
+          h("details", null, h("summary", null, "Восемь вопросов стандарта"),
+            result.questions.map((q) => h("div", { class: "crit", style: "margin-top:8px" },
+              h("div", { class: "row" }, h("b", null, `${q.number}. ${q.title}`), h("span", { class: "spacer" }),
+                h("span", { class: "badge b-score" }, q.answer)),
+              h("div", { class: "small muted" }, q.explanation),
+              h("div", { class: "chips" }, standardEvidence(q.evidence))))),
+          h("details", null, h("summary", null, `Вопросы клиента: ${result.issues.length}`),
+            result.issues.map((issue) => h("div", { class: "crit", style: "margin-top:8px" },
+              h("b", null, issue.title), h("div", { class: "small muted" }, issue.outcome),
+              h("div", { class: "chips" }, standardEvidence(issue.evidence)))))) :
+          !busy ? h("div", { class: "small muted", style: "margin-top:10px" }, "Анализ пока не выполнен.") : null);
+    }
+    async function runStandard() {
+      const external = state.provider !== "local";
+      if (external && !window.confirm("Передать транскрипт внешнему API для отдельного анализа стандарта звонка?")) return;
+      const previous = standardResult;
+      renderStandard(null, true);
+      try {
+        const response = await api(`/dialogs/${encodeURIComponent(cid)}/call-standard`, {
+          method: "POST", body: { provider: external ? "primary" : "local", approved_external_api: external } });
+        renderStandard(response.result, false);
+      } catch (e) { renderStandard(previous, false); fail(e); }
+    }
+    if (standardPanel) {
+      renderStandard(null, false);
+      api(`/dialogs/${encodeURIComponent(cid)}/call-standard`).then((r) => {
+        if (!standardBusy) renderStandard(r.result, false);
+      }).catch(fail);
+    }
     function renderEval(view) {
       if (!view) {
         right.replaceChildren(h("div", { class: "panel empty" }, "Диалог ещё не оценён по выбранному чек-листу.",
-          h("div", { style: "margin-top:12px" }, h("button", { class: "btn primary", onclick: reevaluate }, "Оценить"))));
+          h("div", { style: "margin-top:12px" }, h("button", { class: "btn primary", onclick: reevaluate }, "Оценить"))),
+          ...(standardPanel ? [standardPanel] : []));
         return;
       }
       const cl = view.checklist;
@@ -625,7 +722,7 @@
         h("div", { id: "job-box", style: "margin-top:8px" }));
 
       const cards = view.criteria.map((c) => criterionCard(c, critById[c.criterion_id] || {}, scoreById[c.criterion_id], sections, view));
-      right.replaceChildren(scorePanel, ...cards);
+      right.replaceChildren(scorePanel, ...cards, ...(standardPanel ? [standardPanel] : []));
       const focus = params.get("c");
       if (focus) {
         const el = document.getElementById("crit-" + focus);
@@ -717,7 +814,7 @@
         d.language ? h("span", { class: "badge b-chan" }, d.language) : null,
         h("span", { class: "small muted" }, `${d.messages.length} реплик` + (facts.duration_s ? ` · ${fmtT(facts.duration_s)}` : ""))),
       h("div", { class: "split" },
-        h("div", { class: "panel sticky" }, audioBar, asrNote, h("h2", null, "Транскрипт"), transcript),
+        h("div", { class: "panel sticky" }, audioBar, asrNote, h("h2", null, "Транскрипт"), translationSwitch, transcript),
         right));
     renderEval(ev);
     renderAsrNote();
