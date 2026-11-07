@@ -1,0 +1,11 @@
+# secrets
+.env
+# datasets (real call transcripts contain personal data; audio links are signed)
+data/
+# python
+__pycache__/
+*.pyc
+.venv/
+# misc
+.DS_Store
+*.db
