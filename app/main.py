@@ -4,8 +4,11 @@ Run:  .venv/bin/uvicorn app.main:app --port 8000
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,11 +18,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
+from cqa.audio_pipeline import modes as stt_modes, process_audio
 from cqa.service import Service, ServiceError
 from cqa.store import Store
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
+UPLOADS = ROOT / "data" / "uploads"
+MAX_AUDIO_BYTES = 50 * 1024 * 1024
+SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 class FetchBody(BaseModel):
@@ -73,6 +80,8 @@ def bootstrap(db_path: str | None = None, service: Service | None = None) -> Ser
 
 def create_app(service: Service | None = None) -> FastAPI:
     holder: dict[str, Service] = {}
+    audio_jobs: dict[str, dict] = {}
+    audio_lock = asyncio.Lock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -99,7 +108,7 @@ def create_app(service: Service | None = None) -> FastAPI:
     def health():
         s = svc()
         return {"ok": True, "providers": {k: p.public() for k, p in s.providers.items()},
-                "default_samples": s.default_samples}
+                "default_samples": s.default_samples, "stt": stt_modes()}
 
     # ---------- checklists ----------
     @app.get("/api/checklists")
@@ -134,6 +143,67 @@ def create_app(service: Service | None = None) -> FastAPI:
     def upload(body: UploadBody):
         ids = svc().upload(body.content, body.group_id, body.channel, body.language, body.conversation_id)
         return {"conversation_ids": ids}
+
+    @app.post("/api/dialogs/upload-audio")
+    async def upload_audio(request: Request, mode: str = "local", language: str = "RU",
+                           conversation_id: str | None = None):
+        if mode not in ("local", "cloud") or language not in ("RU", "KZ", "EN", "AUTO"):
+            raise HTTPException(400, "Неверный режим STT или язык")
+        if not stt_modes()[mode]["available"]:
+            raise HTTPException(503, stt_modes()[mode].get("reason", "Локальный STT не настроен"))
+        cid = conversation_id or f"audio-{uuid.uuid4().hex[:10]}"
+        if not SAFE_ID.fullmatch(cid):
+            raise HTTPException(400, "Недопустимый ID диалога")
+        if svc().store.get_dialog(cid):
+            raise HTTPException(409, "Диалог с таким ID уже существует")
+        size = request.headers.get("content-length")
+        if size and size.isdecimal() and int(size) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "Файл больше 50 МБ")
+        body = await request.body()
+        if not body or len(body) > MAX_AUDIO_BYTES:
+            raise HTTPException(413, "Нужен MP3-файл размером до 50 МБ")
+        if not (body.startswith(b"ID3") or (len(body) > 1 and body[0] == 0xFF and body[1] & 0xE0 == 0xE0)):
+            raise HTTPException(415, "Поддерживается MP3-файл")
+        UPLOADS.mkdir(parents=True, exist_ok=True)
+        job_id = uuid.uuid4().hex
+        temp = UPLOADS / f"{job_id}.tmp.mp3"
+        target = UPLOADS / f"{cid}.mp3"
+        if target.exists():
+            raise HTTPException(409, "Файл с таким ID уже существует")
+        temp.write_bytes(body)
+        job = {"job_id": job_id, "status": "running", "stage": "queued", "conversation_id": cid}
+        audio_jobs[job_id] = job
+        active_service = svc()
+        loop = asyncio.get_running_loop()
+
+        async def work():
+            try:
+                async with audio_lock:
+                    def progress(stage: str):
+                        loop.call_soon_threadsafe(job.update, {"stage": stage})
+                    record = await asyncio.to_thread(process_audio, temp, mode,
+                                                     None if language == "AUTO" else language, progress)
+                    job["stage"] = "saving"
+                    record.update({"conversation_id": cid, "language": language,
+                                   "audio_url": f"local:{cid}"})
+                    os.replace(temp, target)
+                    active_service.upload(record, group_id="UPLOAD", channel="voice call",
+                                          language=language, conversation_id=cid)
+                    job.update(status="done", stage="done")
+            except Exception as exc:
+                target.unlink(missing_ok=True)
+                job.update(status="error", stage="error", error=str(exc))
+            finally:
+                temp.unlink(missing_ok=True)
+
+        asyncio.create_task(work())
+        return job
+
+    @app.get("/api/audio-jobs/{job_id}")
+    def audio_job(job_id: str):
+        if job_id not in audio_jobs:
+            raise HTTPException(404, "Задача не найдена")
+        return audio_jobs[job_id]
 
     @app.get("/api/groups")
     def groups():
@@ -174,8 +244,22 @@ def create_app(service: Service | None = None) -> FastAPI:
         return view
 
     @app.get("/api/dialogs/{conversation_id}/audio")
-    async def audio(conversation_id: str):
+    async def audio(conversation_id: str, request: Request):
+        row = svc().store.get_dialog(conversation_id)
+        if row and row["raw"].get("audio_url") == f"local:{conversation_id}":
+            url = str(request.url_for("uploaded_audio_file", conversation_id=conversation_id))
+            return {"src": url, "page": url}
         return await svc().audio_source(conversation_id)
+
+    @app.get("/api/dialogs/{conversation_id}/audio-file", name="uploaded_audio_file")
+    def uploaded_audio_file(conversation_id: str):
+        if not SAFE_ID.fullmatch(conversation_id):
+            raise HTTPException(404, "Запись не найдена")
+        row = svc().store.get_dialog(conversation_id)
+        file = UPLOADS / f"{conversation_id}.mp3"
+        if not row or row["raw"].get("audio_url") != f"local:{conversation_id}" or not file.is_file():
+            raise HTTPException(404, "Запись не найдена")
+        return FileResponse(file, media_type="audio/mpeg")
 
     # ---------- evaluation jobs ----------
     @app.post("/api/evaluations")
