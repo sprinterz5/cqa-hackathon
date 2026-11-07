@@ -33,7 +33,7 @@ class ServiceError(ValueError):
 def cache_key(checklist: Checklist, criterion_id: str, record: dict, models: list[str], samples: int) -> str:
     c = checklist.criterion(criterion_id)
     payload = {
-        "prompt": PROMPT_VERSION, "models": models, "samples": samples,
+        "prompt": PROMPT_VERSION, "models": models, "samples": f"{samples}+adaptive2" if samples > 1 else samples,
         "criterion": c.model_dump(mode="json", exclude={"enabled"}),
         "rules": checklist.general_rules, "context": checklist.company_context or "",
         "channel": record.get("channel"), "transcript": record.get("transcript"),

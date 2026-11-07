@@ -106,3 +106,15 @@ def test_unrecoverable_criterion_needs_review():
     c07 = next(c for c in res.criteria if c.criterion_id == "c07")
     assert c07.status == "needs_review"
     assert res.score is None and "c07" in res.score_error
+
+
+def test_adaptive_samples_when_votes_disagree():
+    script = dict(ALL_OK)
+    # 3 samples: yes, no, no -> disagreement -> 2 more: no, no
+    script["Эмпатия и клиентоориентированность"] = [j("yes"), j("no"), j("no"), j("no"), j("no")]
+    client = FakeClient(script)
+    res = asyncio.run(Evaluator(client, samples=3).evaluate(CL, D))
+    c05 = next(c for c in res.criteria if c.criterion_id == "c05")
+    assert len(c05.samples) == 5 and c05.answer == "no" and c05.confidence == 0.8
+    c01 = next(c for c in res.criteria if c.criterion_id == "c01")
+    assert len(c01.samples) == 3  # unanimous -> no extra calls

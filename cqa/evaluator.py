@@ -157,9 +157,11 @@ def vote(samples: list[Sample], c: Criterion) -> tuple[Sample, float]:
 
 
 class Evaluator:
-    def __init__(self, client: LLMClient, samples: int = 3, temperature: float = 0.5, repairs: int = 2):
+    def __init__(self, client: LLMClient, samples: int = 3, temperature: float = 0.5, repairs: int = 2,
+                 extra_samples: int = 2):
         self.client = client
         self.samples = max(1, samples)
+        self.extra_samples = max(0, extra_samples)  # added only when the first samples disagree
         self.temperature = temperature if self.samples > 1 else 0.0
         self.repairs = repairs
         self.calls: list[LLMCall] = []
@@ -201,6 +203,12 @@ class Evaluator:
                                        evidence=[], explanation="Модель не вернула корректный ответ.",
                                        confidence=0.0, samples=[], errors=errors[-5:])
         rep, conf = vote(samples, c)
+        if conf < 1 and self.extra_samples and self.samples > 1:
+            # adaptive: the samples disagree -> ask for more votes before deciding
+            more = await asyncio.gather(*(self._one_sample(messages, c, d) for _ in range(self.extra_samples)))
+            samples += [s for s, _ in more if s]
+            errors += [e for _, errs in more for e in errs]
+            rep, conf = vote(samples, c)
         return CriterionEvaluation(
             criterion_id=c.id, status="ok", answer=rep.answer, value=rep.value, evidence=rep.evidence,
             explanation=rep.explanation, confidence=conf, samples=samples, errors=errors[-5:],
