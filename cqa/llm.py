@@ -35,6 +35,7 @@ class Provider:
     supports_json_mode: bool = True
     price_in_per_m: float = 0.0   # USD per 1M input tokens (0 = free)
     price_out_per_m: float = 0.0
+    max_parallel: int = 4         # provider-side limit on concurrent requests (Alem: 2 per key)
 
     @classmethod
     def from_env(cls, prefix: str, name: str) -> "Provider | None":
@@ -49,6 +50,7 @@ class Provider:
             model=model,
             price_in_per_m=float(os.environ.get(f"{prefix}_PRICE_IN", 0) or 0),
             price_out_per_m=float(os.environ.get(f"{prefix}_PRICE_OUT", 0) or 0),
+            max_parallel=int(os.environ.get(f"{prefix}_MAX_PARALLEL", 4) or 4),
         )
 
     def public(self) -> dict:
@@ -87,6 +89,10 @@ class LLMError(RuntimeError):
     pass
 
 
+class RateLimited(LLMError):
+    pass
+
+
 class LLMClient:
     def __init__(self, providers: list[Provider], concurrency: int = 6, timeout: float = 120.0,
                  retries: int = 2):
@@ -94,6 +100,7 @@ class LLMClient:
             raise LLMError("no LLM provider configured (set LLM_BASE_URL / LLM_MODEL in .env)")
         self.providers = providers
         self.sem = asyncio.Semaphore(concurrency)
+        self.provider_sem = {p.name: asyncio.Semaphore(max(1, p.max_parallel)) for p in providers}
         self.timeout = timeout
         self.retries = retries
         self._http: httpx.AsyncClient | None = None
@@ -113,12 +120,15 @@ class LLMClient:
         if p.supports_json_mode:
             body["response_format"] = {"type": "json_object"}
         t0 = time.monotonic()
-        r = await self._http.post(f"{p.base_url}/chat/completions", json=body,
-                                  headers={"Authorization": f"Bearer {p.api_key}"})
+        async with self.provider_sem[p.name]:
+            r = await self._http.post(f"{p.base_url}/chat/completions", json=body,
+                                      headers={"Authorization": f"Bearer {p.api_key}"})
         if r.status_code == 400 and p.supports_json_mode and "response_format" in r.text:
             p.supports_json_mode = False  # provider doesn't support JSON mode; prompt still demands JSON
             return await self._once(p, messages, temperature, max_tokens)
         latency = time.monotonic() - t0
+        if r.status_code == 429:
+            raise RateLimited(f"{p.name} HTTP 429: {r.text[:300]}")
         if r.status_code >= 400:
             raise LLMError(f"{p.name} HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
@@ -130,19 +140,28 @@ class LLMClient:
         return content, LLMCall(p.name, p.model, round(latency, 2), pt, ct, round(cost, 6), True)
 
     async def chat(self, messages: list[dict], temperature: float = 0.0,
-                   max_tokens: int = 2000) -> LLMResponse:
+                   max_tokens: int = 4000) -> LLMResponse:
         calls: list[LLMCall] = []
         async with self.sem:
             for p in self.providers:
-                for attempt in range(self.retries + 1):
+                attempt = rate_waits = 0
+                while attempt <= self.retries:
                     try:
                         content, call = await self._once(p, messages, temperature, max_tokens)
                         calls.append(call)
                         if content.strip():
                             return LLMResponse(content, calls)
                         raise LLMError(f"{p.name}: empty response")
+                    except RateLimited as e:
+                        # someone else is using the same key: wait instead of burning retries
+                        calls.append(LLMCall(p.name, p.model, 0, 0, 0, 0, False, str(e)[:300]))
+                        rate_waits += 1
+                        if rate_waits > 8:
+                            attempt += 1
+                        await asyncio.sleep(min(2.0 * rate_waits, 10.0))
                     except (httpx.HTTPError, LLMError, KeyError, ValueError) as e:
                         calls.append(LLMCall(p.name, p.model, 0, 0, 0, 0, False, str(e)[:300]))
-                        if attempt < self.retries:
-                            await asyncio.sleep(1.5 * (attempt + 1))
+                        attempt += 1
+                        if attempt <= self.retries:
+                            await asyncio.sleep(1.5 * attempt)
         raise LLMError("all providers failed: " + "; ".join(c.error or "" for c in calls if not c.ok))
