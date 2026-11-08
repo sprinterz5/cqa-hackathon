@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="static/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#app">К содержимому</a>
   <!--
     Plain HTML/CSS/JS, no build step and no external dependencies, so the page can be
     uploaded as a Dynamics 365 HTML web resource. Query parameters:
@@ -17,7 +18,7 @@
   -->
   <header class="topbar" id="topbar">
     <div class="brand"><span class="logo">CQA</span><span class="brand-sub">Оценка качества диалогов</span></div>
-    <nav class="nav" id="nav">
+    <nav class="nav" id="nav" aria-label="Разделы приложения">
       <a href="#/dialogs" data-route="dialogs">Диалоги</a>
       <a href="#/appeals" data-route="appeals">Апелляции <span class="count" id="appeal-count"></span></a>
       <a href="#/checklists" data-route="checklists">Чек-листы</a>
@@ -25,13 +26,13 @@
     </nav>
     <div class="role" title="Роль для демонстрации: подача апелляции и её рассмотрение — разные действия">
       <span>Роль:</span>
-      <div class="seg" id="role-switch">
+      <div class="seg" id="role-switch" role="group" aria-label="Роль в демонстрации">
         <button data-role="operator">Оператор</button>
         <button data-role="reviewer">Проверяющий</button>
       </div>
     </div>
   </header>
-  <main id="app" class="app"></main>
+  <main id="app" class="app" tabindex="-1"></main>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="static/app.js"></script>
 </body>

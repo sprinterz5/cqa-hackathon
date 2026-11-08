@@ -66,6 +66,7 @@
   function toast(msg, err) {
     const t = $("#toast");
     t.textContent = msg;
+    t.setAttribute("role", err ? "alert" : "status");
     t.className = "toast show" + (err ? " err" : "");
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (t.className = "toast"), err ? 6000 : 3000);
@@ -80,21 +81,62 @@
   }
   const evLabel = (e) => (e.from_id === e.to_id ? e.from_id : e.from_id + "–" + e.to_id);
 
+  let modalId = 0;
   function modal(content) {
-    const back = h("div", { class: "modal-back", onclick: (e) => { if (e.target === back) close(); } }, h("div", { class: "modal" }, content));
-    function close() { back.remove(); }
+    const previousFocus = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    const background = [$("#topbar"), $("#app")].filter(Boolean);
+    const previousInert = background.map((el) => el.inert);
+    const title = content.querySelector("h2, h1");
+    if (title && !title.id) title.id = `modal-title-${++modalId}`;
+    const panel = h("div", { class: "modal", role: "dialog", "aria-modal": "true",
+      "aria-labelledby": title ? title.id : null, "aria-label": title ? null : "Окно", tabindex: "-1" }, content);
+    const back = h("div", { class: "modal-back", onclick: (e) => { if (e.target === back) close(); } }, panel);
+    function focusable() {
+      return [...panel.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        .filter((el) => el.getClientRects().length);
+    }
+    function onKeydown(e) {
+      if (e.key === "Escape") { e.preventDefault(); close(); return; }
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) { e.preventDefault(); panel.focus(); return; }
+      const first = items[0], last = items[items.length - 1];
+      if (e.shiftKey && (document.activeElement === first || !panel.contains(document.activeElement))) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && (document.activeElement === last || !panel.contains(document.activeElement))) {
+        e.preventDefault(); first.focus();
+      }
+    }
+    function close() {
+      document.removeEventListener("keydown", onKeydown);
+      back.remove();
+      background.forEach((el, i) => { el.inert = previousInert[i]; });
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus && previousFocus.isConnected) previousFocus.focus();
+    }
     document.body.appendChild(back);
+    background.forEach((el) => { el.inert = true; });
+    document.body.style.overflow = "hidden";
+    document.addEventListener("keydown", onKeydown);
+    requestAnimationFrame(() => (focusable()[0] || panel).focus());
     return close;
   }
 
   // ---------- shell ----------
   function setRole(r) {
     state.role = r; store.set("role", r);
-    document.querySelectorAll("#role-switch button").forEach((b) => b.classList.toggle("on", b.dataset.role === r));
+    document.querySelectorAll("#role-switch button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.role === r);
+      b.setAttribute("aria-pressed", String(b.dataset.role === r));
+    });
     route();
   }
   document.querySelectorAll("#role-switch button").forEach((b) => b.addEventListener("click", () => setRole(b.dataset.role)));
-  document.querySelectorAll("#role-switch button").forEach((b) => b.classList.toggle("on", b.dataset.role === state.role));
+  document.querySelectorAll("#role-switch button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.role === state.role);
+    b.setAttribute("aria-pressed", String(b.dataset.role === state.role));
+  });
 
   async function refreshAppealCount() {
     try {
@@ -115,24 +157,34 @@
   }
 
   const views = {};
-  async function route() {
+  async function route(focusHeading = false) {
     const hash = location.hash || (qs.get("conversation_id") ? "#/dialog/" + encodeURIComponent(qs.get("conversation_id")) : "#/dialogs");
     const [path, query] = hash.slice(2).split("?");
     const parts = path.split("/").map(decodeURIComponent);
     const params = new URLSearchParams(query || "");
-    document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === (parts[0] === "dialog" ? "dialogs" : parts[0])));
+    document.querySelectorAll("#nav a").forEach((a) => {
+      const active = a.dataset.route === (parts[0] === "dialog" ? "dialogs" : parts[0]);
+      a.classList.toggle("active", active);
+      if (active) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+    });
     const app = $("#app");
     app.replaceChildren(h("div", { class: "empty" }, "Загрузка…"));
     try {
       if (!state.checklists.length) await loadChecklists();
       const v = { dialogs: views.dialogs, dialog: views.dialog, appeals: views.appeals, checklists: views.checklists, quality: views.quality }[parts[0]] || views.dialogs;
       await v(app, parts.slice(1), params);
+      if (focusHeading) {
+        const heading = app.querySelector("h1");
+        if (heading) { heading.tabIndex = -1; heading.focus(); }
+      }
     } catch (e) {
-      app.replaceChildren(h("div", { class: "panel empty" }, "Ошибка: " + e.message));
+      app.replaceChildren(h("div", { class: "panel empty", role: "alert" },
+        h("h1", null, "Не удалось открыть раздел"), h("p", null, e.message),
+        h("button", { class: "btn", onclick: () => route() }, "Повторить")));
     }
     refreshAppealCount();
   }
-  window.addEventListener("hashchange", route);
+  window.addEventListener("hashchange", () => route(true));
 
   // ---------- jobs ----------
   async function runJob(ids, opts) {
@@ -182,8 +234,22 @@
     state.health = state.health || await api("/health");
 
     const tbody = h("tbody");
+    const summaryEl = h("div", { class: "summary-grid", "aria-label": "Обзор диалогов" });
     const countEl = h("span", { class: "small muted" });
     const runSel = h("button", { class: "btn", onclick: () => run([...selected]) }, "Оценить выбранные");
+    const runAll = h("button", { class: "btn primary", onclick: () => run(visible().map((d) => d.conversation_id)) }, "Оценить показанные");
+
+    function renderSummary() {
+      const evaluated = dialogs.filter((d) => d.evaluation).length;
+      const attention = dialogs.filter((d) => {
+        const e = d.evaluation;
+        return e && (e.gross_violation || e.needs_review.length || e.low_confidence.length || e.open_appeals);
+      }).length;
+      const stat = (label, value) => h("div", { class: "stat" },
+        h("span", { class: "stat-value" }, value), h("span", { class: "stat-label" }, label));
+      summaryEl.replaceChildren(stat("Всего диалогов", dialogs.length), stat("Оценено", evaluated),
+        stat("Требуют внимания", attention), stat("Без оценки", dialogs.length - evaluated));
+    }
 
     function visible() {
       return dialogs.filter((d) => {
@@ -201,13 +267,19 @@
 
     function renderRows() {
       const rows = visible();
+      renderSummary();
       countEl.textContent = `${rows.length} из ${dialogs.length}`;
       runSel.disabled = !selected.size;
       runSel.textContent = selected.size ? `Оценить выбранные (${selected.size})` : "Оценить выбранные";
+      runAll.disabled = !rows.length;
+      runAll.textContent = `Оценить показанные (${rows.length})`;
+      resetBtn.hidden = !(filter.q || filter.channel || filter.flagged);
       tbody.replaceChildren(...rows.map((d) => {
         const e = d.evaluation;
-        const open = () => (location.hash = "#/dialog/" + encodeURIComponent(d.conversation_id));
+        const url = "#/dialog/" + encodeURIComponent(d.conversation_id);
+        const open = () => (location.hash = url);
         const cb = h("input", { type: "checkbox", checked: selected.has(d.conversation_id),
+          "aria-label": `Выбрать диалог ${d.conversation_id}`,
           onclick: (ev) => ev.stopPropagation(),
           onchange: (ev) => { ev.target.checked ? selected.add(d.conversation_id) : selected.delete(d.conversation_id); renderRows(); } });
         const flags = [];
@@ -219,18 +291,20 @@
           if (e.changed) flags.push(h("span", { class: "badge b-chan" }, "Изменено проверяющим"));
         }
         return h("tr", { class: "click", onclick: open },
-          h("td", null, cb),
-          h("td", null, h("b", null, d.conversation_id), h("div", { class: "small muted" }, d.group_id || "")),
-          h("td", null, h("span", { class: "badge b-chan" }, CHANNEL[d.channel] || d.channel)),
-          h("td", null, d.language || "—"),
-          h("td", { class: "num" }, d.messages),
-          h("td", { class: "num total" }, e ? (e.total == null ? "—" : fmt(e.total)) : h("span", { class: "muted" }, "не оценён")),
-          h("td", { class: "num total" }, e && e.final_total !== e.total ? fmt(e.final_total) : ""),
-          h("td", null, h("div", { class: "chips" }, flags),
+          h("td", { "data-label": "Выбор" }, cb),
+          h("td", { "data-label": "Диалог" }, h("a", { class: "dialog-link", href: url, onclick: (ev) => ev.stopPropagation() }, d.conversation_id),
+            h("div", { class: "small muted" }, d.group_id || "")),
+          h("td", { "data-label": "Канал" }, h("span", { class: "badge b-chan" }, CHANNEL[d.channel] || d.channel)),
+          h("td", { "data-label": "Язык" }, d.language || "—"),
+          h("td", { class: "num", "data-label": "Реплик" }, d.messages),
+          h("td", { class: "num total", "data-label": "Оценка AI" }, e ? (e.total == null ? "—" : fmt(e.total)) : h("span", { class: "muted" }, "не оценён")),
+          h("td", { class: "num total", "data-label": "Итог" }, e && e.final_total !== e.total ? fmt(e.final_total) : "—"),
+          h("td", { "data-label": "Отметки" }, h("div", { class: "chips" }, flags),
             e && e.gross_violation && e.gross_reason ? h("div", { class: "small gross-reason" }, e.gross_reason) : null),
-          h("td", { class: "small muted" }, e ? `v${e.checklist_version}` : ""));
+          h("td", { class: "small muted", "data-label": "Чек-лист" }, e ? `v${e.checklist_version}` : "—"));
       }));
-      if (!rows.length) tbody.replaceChildren(h("tr", null, h("td", { colspan: 9, class: "empty" }, "Нет диалогов. Загрузите набор по group_id или добавьте диалог.")));
+      if (!rows.length) tbody.replaceChildren(h("tr", { class: "empty-row" }, h("td", { colspan: 9, class: "empty" },
+        dialogs.length ? "По этим фильтрам диалогов нет. Сбросьте фильтры." : "Диалогов пока нет. Загрузите набор или добавьте диалог.")));
     }
 
     async function reload() {
@@ -245,7 +319,25 @@
       await reload();
     }
 
-    const groupInput = h("input", { placeholder: "group_id, например DEV", style: "width:180px" });
+    const groupInput = h("input", { placeholder: "Например, DEV", style: "width:180px" });
+    const searchInput = h("input", { type: "search", placeholder: "Найти по ID",
+      oninput: (e) => { filter.q = e.target.value; renderRows(); } });
+    const channelSelect = h("select", { onchange: (e) => { filter.channel = e.target.value; renderRows(); } },
+      h("option", { value: "" }, "Все каналы"), h("option", { value: "agent chat" }, "Чаты"),
+      h("option", { value: "voice call" }, "Звонки"));
+    const flagSelect = h("select", { onchange: (e) => { filter.flagged = e.target.value; renderRows(); } },
+      h("option", { value: "" }, "Все отметки"),
+      h("option", { value: "gross" }, "Грубые ошибки"),
+      h("option", { value: "attention" }, "Требуют внимания"),
+      h("option", { value: "appeals" }, "С открытой апелляцией"),
+      h("option", { value: "changed" }, "Изменены проверяющим"),
+      h("option", { value: "none" }, "Не оценены"));
+    const resetBtn = h("button", { class: "btn ghost", hidden: true, onclick: () => {
+      filter.q = filter.channel = filter.flagged = "";
+      searchInput.value = channelSelect.value = flagSelect.value = "";
+      renderRows();
+      searchInput.focus();
+    } }, "Сбросить фильтры");
     const fetchBtn = h("button", { class: "btn", onclick: async () => {
       const g = groupInput.value.trim();
       if (!g) return toast("Введите group_id", true);
@@ -277,15 +369,17 @@
     if (state.health.providers.local) provOptions.push(h("option", { value: "local", selected: state.provider === "local" }, "Локально: " + state.health.providers.local.model));
 
     app.replaceChildren(
-      h("div", { class: "row", style: "margin-bottom:12px" },
-        h("div", null, h("h1", null, "Диалоги"), h("div", { class: "sub" }, "Выберите диалоги и запустите оценку по чек-листу")),
-        h("span", { class: "spacer" }),
-        groupInput, fetchBtn,
-        h("button", { class: "btn", onclick: () => uploadDialog("text") }, "Добавить диалог"),
-        h("button", { class: "btn", onclick: () => uploadDialog("audio"), title: "mp3, wav, m4a, ogg: распознавание речи, роли, оценка" }, "Загрузить запись звонка"),
-        exportBtn),
-      h("div", { class: "panel", style: "margin-bottom:12px" },
-        h("div", { class: "row" },
+      h("div", { class: "page-head" },
+        h("div", null, h("h1", null, "Диалоги"),
+          h("p", { class: "sub" }, "Загрузите разговоры, проверьте выводы модели и сохраните итоговые оценки.")),
+        h("div", { class: "page-actions" },
+          h("label", { class: "field" }, "group_id набора", groupInput), fetchBtn,
+          h("button", { class: "btn", onclick: () => uploadDialog("text") }, "Добавить диалог"),
+          h("button", { class: "btn", onclick: () => uploadDialog("audio"), title: "MP3, WAV, M4A, OGG: распознавание речи, роли, оценка" }, "Загрузить звонок"),
+          exportBtn)),
+      summaryEl,
+      h("section", { class: "panel action-panel", "aria-label": "Настройки оценки" },
+        h("div", { class: "row action-row" },
           h("label", { class: "field" }, "Набор",
             h("select", { onchange: (e) => { state.group = e.target.value; store.set("group", state.group); route(); } },
               h("option", { value: "" }, "Все"), groups.map((g) => h("option", { value: g, selected: g === state.group }, g)))),
@@ -295,29 +389,24 @@
             h("select", { onchange: (e) => { state.samples = +e.target.value; store.set("samples", state.samples); } },
               [1, 3, 5].map((n) => h("option", { value: n, selected: n === state.samples }, n)))),
           h("span", { class: "spacer" }),
-          runSel,
-          h("button", { class: "btn primary", onclick: () => run(visible().map((d) => d.conversation_id)) }, "Оценить все показанные")),
-        h("div", { id: "job-box", style: "margin-top:10px" })),
-      h("div", { class: "panel" },
-        h("div", { class: "row", style: "margin-bottom:8px" },
-          h("input", { placeholder: "Поиск по ID", oninput: (e) => { filter.q = e.target.value; renderRows(); } }),
-          h("select", { onchange: (e) => { filter.channel = e.target.value; renderRows(); } },
-            h("option", { value: "" }, "Все каналы"), h("option", { value: "agent chat" }, "Чаты"), h("option", { value: "voice call" }, "Звонки")),
-          h("select", { onchange: (e) => { filter.flagged = e.target.value; renderRows(); } },
-            h("option", { value: "" }, "Все отметки"),
-            h("option", { value: "gross" }, "Грубые ошибки"),
-            h("option", { value: "attention" }, "Требуют внимания"),
-            h("option", { value: "appeals" }, "С открытой апелляцией"),
-            h("option", { value: "changed" }, "Изменены проверяющим"),
-            h("option", { value: "none" }, "Не оценены")),
-          h("span", { class: "spacer" }), countEl),
-        h("table", { class: "table" },
+          runSel, runAll),
+        h("div", { id: "job-box", style: "margin-top:12px" })),
+      h("section", { class: "panel list-panel", "aria-label": "Список диалогов" },
+        h("div", { class: "list-head" }, h("h2", null, "Список диалогов"), countEl),
+        h("div", { class: "filter-row" },
+          h("label", { class: "field" }, "Поиск", searchInput),
+          h("label", { class: "field" }, "Канал", channelSelect),
+          h("label", { class: "field" }, "Статус", flagSelect), resetBtn),
+        h("div", { class: "table-wrap", role: "region", "aria-label": "Таблица диалогов", tabindex: "0" },
+          h("table", { class: "table" },
           h("thead", null, h("tr", null,
-            h("th", null, h("input", { type: "checkbox", title: "Выбрать все показанные", onchange: (e) => {
+            h("th", { scope: "col" }, h("input", { type: "checkbox", "aria-label": "Выбрать все показанные диалоги", onchange: (e) => {
               visible().forEach((d) => (e.target.checked ? selected.add(d.conversation_id) : selected.delete(d.conversation_id))); renderRows(); } })),
-            h("th", null, "Диалог"), h("th", null, "Канал"), h("th", null, "Язык"), h("th", { class: "num" }, "Реплик"),
-            h("th", { class: "num" }, "Оценка AI"), h("th", { class: "num" }, "Итог"), h("th", null, "Отметки"), h("th", null, "Чек-лист"))),
-          tbody)));
+            h("th", { scope: "col" }, "Диалог"), h("th", { scope: "col" }, "Канал"),
+            h("th", { scope: "col" }, "Язык"), h("th", { scope: "col", class: "num" }, "Реплик"),
+            h("th", { scope: "col", class: "num" }, "Оценка AI"), h("th", { scope: "col", class: "num" }, "Итог"),
+            h("th", { scope: "col" }, "Отметки"), h("th", { scope: "col" }, "Чек-лист"))),
+          tbody))));
     renderRows();
     renderJob();
   };
@@ -328,9 +417,10 @@
     let close = () => {};
     function show(which) {
       tabs.replaceChildren(
-        h("button", { class: which === "text" ? "on" : "", onclick: () => show("text") }, "Текст или JSON"),
-        h("button", { class: which === "audio" ? "on" : "", onclick: () => show("audio") }, "Запись звонка"));
+        h("button", { class: which === "text" ? "on" : "", "aria-pressed": String(which === "text"), onclick: () => show("text") }, "Текст или JSON"),
+        h("button", { class: which === "audio" ? "on" : "", "aria-pressed": String(which === "audio"), onclick: () => show("audio") }, "Запись звонка"));
       body.replaceChildren(which === "audio" ? audioForm() : textForm());
+      tabs.querySelector(".on").focus();
     }
 
     function textForm() {
@@ -341,8 +431,13 @@
       const file = h("input", { type: "file", accept: ".json,.txt", onchange: async (e) => { const f = e.target.files[0]; if (f) ta.value = await f.text(); } });
       return h("div", { class: "stack" },
         h("div", { class: "sub" }, "Можно вставить JSON (одна запись, массив или весь ответ API) или текст «роль: реплика»."),
-        file, ta,
-        h("div", { class: "row" }, id, channel, lang, h("span", { class: "spacer" }),
+        h("label", { class: "field" }, "Загрузить файл .json или .txt", file),
+        h("label", { class: "field" }, "Транскрипт", ta),
+        h("div", { class: "row form-row" },
+          h("label", { class: "field" }, "ID диалога", id),
+          h("label", { class: "field" }, "Канал", channel),
+          h("label", { class: "field" }, "Язык", lang),
+          h("span", { class: "spacer" }),
           h("button", { class: "btn", onclick: () => close() }, "Отмена"),
           h("button", { class: "btn primary", onclick: async () => {
             try {
@@ -366,11 +461,11 @@
       const preview = h("div");
       const input = h("input", { type: "file", accept: "audio/*,.mp3,.wav,.m4a,.ogg,.webm,.flac", style: "display:none",
         onchange: (e) => pick(e.target.files[0]) });
-      const drop = h("div", { class: "drop", onclick: () => input.click(),
+      const drop = h("button", { type: "button", class: "drop", onclick: () => input.click(),
         ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); },
         ondragleave: () => drop.classList.remove("over"),
         ondrop: (e) => { e.preventDefault(); drop.classList.remove("over"); pick(e.dataTransfer.files[0]); } },
-        h("b", null, "Перетащите запись звонка сюда"), h("div", { class: "small muted" }, "или нажмите, чтобы выбрать файл · mp3, wav, m4a, ogg, до 100 МБ"));
+        h("b", null, "Выбрать запись звонка"), h("span", { class: "small muted" }, "или перетащить сюда · MP3, WAV, M4A, OGG · до 100 МБ"));
       function pick(f) {
         if (!f) return;
         picked = f;
@@ -385,7 +480,7 @@
         h("option", { value: "RU" }, "Русский"), h("option", { value: "KZ" }, "Қазақша"), h("option", { value: "EN" }, "English"));
       const cl = state.checklists.find((c) => c.id === state.checklistId);
       const evalNow = h("input", { type: "checkbox", checked: true });
-      const steps = h("ol", { class: "steps" });
+      const steps = h("ol", { class: "steps", "aria-live": "polite", "aria-label": "Ход обработки записи" });
       const go = h("button", { class: "btn primary", disabled: true, onclick: start }, "Распознать");
       // cloud: Alem STT (needs consent: the recording leaves this machine); local: Whisper + voice separation
       const mode = h("select", { onchange: () => { renderSteps(null); sync(); } },
@@ -456,7 +551,10 @@
       return h("div", { class: "stack" },
         h("div", { class: "sub" }, "Запись расшифруется, система определит, где говорит оператор, а где клиент, и оценит звонок по чек-листу. Роли потом можно поправить в карточке."),
         input, drop, preview,
-        h("div", { class: "row" }, id, lang, mode),
+        h("div", { class: "row form-row" },
+          h("label", { class: "field" }, "ID диалога", id),
+          h("label", { class: "field" }, "Язык записи", lang),
+          h("label", { class: "field" }, "Распознавание", mode)),
         consentRow,
         h("label", { class: "check" }, evalNow, `Сразу оценить по чек-листу «${cl ? cl.name : state.checklistId}»`),
         steps,
