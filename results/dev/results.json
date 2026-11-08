@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "team_name": "CQA team",
+  "team_name": "Zeroday",
   "model": {
     "mode": "external_api",
     "name": "gpt-oss"
