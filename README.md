@@ -1,5 +1,7 @@
 # CQA — Conversation Quality Analytics
 
+**Team: Zeroday** — Data Challenge'26, Freedom Broker CQA Hackathon
+
 Freedom Broker CQA Hackathon prototype: configurable checklists, AI evaluation of operator chats and calls (RU / KZ / EN), evidence links, appeals and reviewer decisions.
 
 ## Setup
